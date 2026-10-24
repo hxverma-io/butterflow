@@ -24,6 +24,7 @@ public:
 
     void StartRemoteCapture(ScreenEdge targetEdge, float normY, int remoteW = 1920, int remoteH = 1080);
     void StopRemoteCapture();
+    void SyncCursorPos(int x, int y);
 
     void SetSpeedMultiplier(float mult) { m_speedMultiplier = mult; }
     float GetSpeedMultiplier() const { return m_speedMultiplier; }
@@ -31,6 +32,7 @@ public:
     // Internal hook callbacks
     LRESULT HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam);
     LRESULT HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam);
+    void HandleRawInputMessage(LPARAM lParam);
 
 private:
     InputCapturer();
@@ -39,6 +41,7 @@ private:
     // Apple macOS signature ballistics model
     void ApplyMacBallistics(double rawDx, double rawDy, double dtMs, double& outDx, double& outDy);
 
+    HWND m_hRawInputWnd;
     HHOOK m_hMouseHook;
     HHOOK m_hKeyHook;
     EdgePhysics* m_physics;
@@ -68,6 +71,7 @@ private:
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK RawInputWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 };
 
 #endif // BUTTERFLOW_INPUT_CAPTURER_H

@@ -8,7 +8,8 @@ InputCapturer& InputCapturer::Instance() {
 }
 
 InputCapturer::InputCapturer()
-    : m_hMouseHook(nullptr),
+    : m_hRawInputWnd(nullptr),
+      m_hMouseHook(nullptr),
       m_hKeyHook(nullptr),
       m_physics(nullptr),
       m_lastPos({ 0, 0 }),
@@ -40,24 +41,18 @@ void InputCapturer::ApplyMacBallistics(double rawDx, double rawDy, double dtMs, 
         return;
     }
 
-    // Clamp dt to reasonable bounds (0.5ms to 64ms)
     double dt = std::clamp(dtMs, 0.5, 64.0);
-    // Instantaneous velocity in pixels per millisecond
     double v = dist / dt;
 
-    // Authentic macOS pointer ballistics (IOHIDFamily quintic sigmoidal model):
-    // 1. Slow micro-precision zone (v <= 0.18 px/ms): Gain is 0.88x for tremor suppression and pixel targeting
-    // 2. Normal human swipe zone (0.18 < v <= 1.25 px/ms): Smooth natural quadratic ramp
-    // 3. Fast flick zone (v > 1.25 px/ms): Hyperbolic tangent saturation preventing erratic teleportation
     double gain = 1.0;
     if (v <= 0.18) {
         gain = 0.88;
     } else if (v <= 1.25) {
         double t = (v - 0.18) / (1.25 - 0.18);
-        gain = 0.88 + 0.92 * std::pow(t, 1.35); // Smooth natural ramping to 1.80
+        gain = 0.88 + 0.92 * std::pow(t, 1.35);
     } else {
         double excess = (v - 1.25) / 1.5;
-        gain = 1.80 + 0.85 * std::tanh(excess); // Smooth saturation up to 2.65 max
+        gain = 1.80 + 0.85 * std::tanh(excess);
     }
 
     outDx = rawDx * gain;
@@ -72,6 +67,27 @@ bool InputCapturer::InstallHooks(EdgePhysics* physics) {
     m_anchorPos = { m_screenWidth / 2, m_screenHeight / 2 };
     m_lastRemoteRawPos = m_anchorPos;
 
+    // 1. Register Hidden Window for Raw Input Sink
+    WNDCLASSEXA wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXA);
+    wc.lpfnWndProc = RawInputWndProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = "ButterflowRawInputSinkClass";
+    RegisterClassExA(&wc);
+
+    m_hRawInputWnd = CreateWindowExA(0, "ButterflowRawInputSinkClass", "ButterflowRawInputSink",
+                                     WS_POPUP, 0, 0, 0, 0,
+                                     nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+
+    // 2. Register Raw Input Device for Mouse (hardware deltas regardless of cursor position/screen edges)
+    RAWINPUTDEVICE rid = {};
+    rid.usUsagePage = 0x01; // HID Generic Desktop
+    rid.usUsage = 0x02;     // HID Mouse
+    rid.dwFlags = RIDEV_INPUTSINK;
+    rid.hwndTarget = m_hRawInputWnd;
+    RegisterRawInputDevices(&rid, 1, sizeof(rid));
+
+    // 3. Install Low-Level Hooks for button/keyboard capture and suppression
     m_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
     m_hKeyHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
 
@@ -88,6 +104,11 @@ void InputCapturer::UninstallHooks() {
         UnhookWindowsHookEx(m_hKeyHook);
         m_hKeyHook = nullptr;
     }
+    if (m_hRawInputWnd) {
+        DestroyWindow(m_hRawInputWnd);
+        m_hRawInputWnd = nullptr;
+    }
+    UnregisterClassA("ButterflowRawInputSinkClass", GetModuleHandle(nullptr));
 }
 
 void InputCapturer::SetCallbacks(MouseEventCallback onMouse, KeyEventCallback onKey, EscapeCallback onEscape) {
@@ -100,31 +121,18 @@ void InputCapturer::SetInterventionCallback(InterventionCallback onIntervention)
     m_onIntervention = onIntervention;
 }
 
+void InputCapturer::SyncCursorPos(int x, int y) {
+    m_lastPos = { x, y };
+    m_lastRemoteRawPos = { x, y };
+}
+
 void InputCapturer::StartRemoteCapture(ScreenEdge targetEdge, float normY, int remoteW, int remoteH) {
     m_isRemoteCapturing = true;
     m_remoteWidth = remoteW > 0 ? remoteW : 1920;
     m_remoteHeight = remoteH > 0 ? remoteH : 1080;
 
-    // Initialize remote cursor position on entry side
-    if (targetEdge == EDGE_LEFT) {
-        m_remoteCurX = 40.0; // Safe 40px entry margin inside remote display
-        m_remoteCurY = std::clamp(normY, 0.05f, 0.95f) * m_remoteHeight;
-    } else if (targetEdge == EDGE_RIGHT) {
-        m_remoteCurX = m_remoteWidth - 40.0;
-        m_remoteCurY = std::clamp(normY, 0.05f, 0.95f) * m_remoteHeight;
-    } else if (targetEdge == EDGE_TOP) {
-        m_remoteCurX = std::clamp(normY, 0.05f, 0.95f) * m_remoteWidth;
-        m_remoteCurY = 40.0;
-    } else { // EDGE_BOTTOM
-        m_remoteCurX = std::clamp(normY, 0.05f, 0.95f) * m_remoteWidth;
-        m_remoteCurY = m_remoteHeight - 40.0;
-    }
-
-    // Set anchor position to screen center
-    m_anchorPos = { m_screenWidth / 2, m_screenHeight / 2 };
-    SetCursorPos(m_anchorPos.x, m_anchorPos.y);
-    m_lastRemoteRawPos = m_anchorPos;
-    m_lastPos = m_anchorPos;
+    GetCursorPos(&m_lastPos);
+    m_lastRemoteRawPos = m_lastPos;
     m_lastMoveTime = std::chrono::steady_clock::now();
     m_subPixelDx = 0.0;
     m_subPixelDy = 0.0;
@@ -136,6 +144,82 @@ void InputCapturer::StopRemoteCapture() {
     m_lastRemoteRawPos = m_lastPos;
     m_subPixelDx = 0.0;
     m_subPixelDy = 0.0;
+}
+
+LRESULT CALLBACK InputCapturer::RawInputWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_INPUT) {
+        InputCapturer::Instance().HandleRawInputMessage(lParam);
+        return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+    }
+    return DefWindowProcA(hwnd, uMsg, wParam, lParam);
+}
+
+void InputCapturer::HandleRawInputMessage(LPARAM lParam) {
+    UINT dwSize = 0;
+    GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
+    if (dwSize == 0) return;
+
+    std::vector<BYTE> rawBuffer(dwSize);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, rawBuffer.data(), &dwSize, sizeof(RAWINPUTHEADER)) != dwSize) {
+        return;
+    }
+
+    RAWINPUT* raw = reinterpret_cast<RAWINPUT*>(rawBuffer.data());
+    if (raw->header.dwType != RIM_TYPEMOUSE) return;
+
+    // Ignore synthetic events injected by Butterflow
+    if (raw->data.mouse.ulExtraInformation == BUTTERFLOW_EXTRA_INFO_MAGIC) {
+        return;
+    }
+
+    // 1. Companion Receiver Check: Physical movement on companion yields control
+    if (m_physics && m_physics->IsCompanionReceiving()) {
+        if (raw->header.hDevice != nullptr) {
+            int delta = std::abs(raw->data.mouse.lLastX) + std::abs(raw->data.mouse.lLastY);
+            m_companionPhysicalDelta += delta;
+            if (m_companionPhysicalDelta > 120) { // Require >120 counts of deliberate physical movement
+                m_companionPhysicalDelta = 0;
+                if (m_onIntervention) {
+                    m_onIntervention();
+                }
+            }
+        }
+        return;
+    }
+
+    // 2. Remote Host Mode: Stream pure physical relative deltas to Companion PC
+    bool isRemote = m_isRemoteCapturing || (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
+    if (!isRemote) return;
+
+    if (!(raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+        int rawDx = raw->data.mouse.lLastX;
+        int rawDy = raw->data.mouse.lLastY;
+
+        if (rawDx != 0 || rawDy != 0) {
+            double dist = std::sqrt(static_cast<double>(rawDx * rawDx + rawDy * rawDy));
+            // macOS Continuous Smooth Super-Fast Curve:
+            // Slow precision: 1.4x (sub-pixel control)
+            // Fast flick: 2.8x (instant cross-screen navigation)
+            double speedFactor = 1.4 + 1.4 * std::tanh(dist / 8.0);
+
+            double targetDx = (rawDx * speedFactor) + m_subPixelDx;
+            double targetDy = (rawDy * speedFactor) + m_subPixelDy;
+
+            int appliedDx = static_cast<int>(std::round(targetDx));
+            int appliedDy = static_cast<int>(std::round(targetDy));
+
+            m_subPixelDx = targetDx - appliedDx;
+            m_subPixelDy = targetDy - appliedDy;
+
+            if (m_onMouse && (appliedDx != 0 || appliedDy != 0)) {
+                MouseInputPayload payload = {};
+                payload.flags = MFLAG_MOVE;
+                payload.dx = static_cast<int16_t>(appliedDx);
+                payload.dy = static_cast<int16_t>(appliedDy);
+                m_onMouse(payload);
+            }
+        }
+    }
 }
 
 LRESULT CALLBACK InputCapturer::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -155,27 +239,19 @@ LRESULT CALLBACK InputCapturer::LowLevelKeyboardProc(int nCode, WPARAM wParam, L
 LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) {
     MSLLHOOKSTRUCT* pMouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-    // CRITICAL: Ignore any synthetic inputs injected by Butterflow or software
+    // CRITICAL: Always keep position synchronized on synthetic / injected inputs
     if ((pMouse->flags & LLMHF_INJECTED) || (pMouse->dwExtraInfo == BUTTERFLOW_EXTRA_INFO_MAGIC)) {
+        m_lastPos = pMouse->pt;
+        m_lastRemoteRawPos = pMouse->pt;
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
 
-    // 1. Companion Receiver Check: If local user deliberately touches physical mouse on Companion PC, yield remote control!
+    // 1. Companion Receiver Check: Physical mouse clicks immediately yield remote control
     if (m_physics && m_physics->IsCompanionReceiving()) {
         if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
             m_companionPhysicalDelta = 0;
             if (m_onIntervention) {
                 m_onIntervention();
-            }
-        } else if (wParam == WM_MOUSEMOVE) {
-            int moveDist = std::abs(pMouse->pt.x - m_lastPos.x) + std::abs(pMouse->pt.y - m_lastPos.y);
-            m_lastPos = pMouse->pt;
-            m_companionPhysicalDelta += moveDist;
-            if (m_companionPhysicalDelta > 100) { // Require >100px deliberate physical movement
-                m_companionPhysicalDelta = 0;
-                if (m_onIntervention) {
-                    m_onIntervention();
-                }
             }
         }
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -186,60 +262,12 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
 
     if (isRemote) {
         if (wParam == WM_MOUSEMOVE) {
-            int dx = pMouse->pt.x - m_lastRemoteRawPos.x;
-            int dy = pMouse->pt.y - m_lastRemoteRawPos.y;
-            m_lastRemoteRawPos = pMouse->pt;
-
-            if (dx != 0 || dy != 0) {
-                // Super Fast Cursor Boost with Sub-Pixel Fractional Accumulation
-                double dist = std::sqrt(static_cast<double>(dx * dx + dy * dy));
-
-                // Dynamic speed curve:
-                // Base 2.2x speed multiplier with dynamic momentum scaling
-                // Micro precision (dist <= 2px): 1.54x (smooth fine control)
-                // Fast flicks (dist > 6px): 2.75x (super fast screen traversal)
-                double speedFactor = m_speedMultiplier;
-                if (dist <= 2.0) {
-                    speedFactor = m_speedMultiplier * 0.70;
-                } else if (dist > 6.0) {
-                    speedFactor = m_speedMultiplier * 1.25;
-                }
-
-                double targetDx = (dx * speedFactor) + m_subPixelDx;
-                double targetDy = (dy * speedFactor) + m_subPixelDy;
-
-                int appliedDx = static_cast<int>(std::round(targetDx));
-                int appliedDy = static_cast<int>(std::round(targetDy));
-
-                m_subPixelDx = targetDx - appliedDx;
-                m_subPixelDy = targetDy - appliedDy;
-
-                if (m_onMouse && (appliedDx != 0 || appliedDy != 0)) {
-                    MouseInputPayload payload = {};
-                    payload.flags = MFLAG_MOVE;
-                    payload.dx = static_cast<int16_t>(appliedDx);
-                    payload.dy = static_cast<int16_t>(appliedDy);
-                    m_onMouse(payload);
-                }
-
-                // Keep mouse cursor away from physical monitor edges so it never stops reporting deltas
-                const int EDGE_MARGIN = 200;
-                if (pMouse->pt.x < EDGE_MARGIN || pMouse->pt.x > m_screenWidth - EDGE_MARGIN ||
-                    pMouse->pt.y < EDGE_MARGIN || pMouse->pt.y > m_screenHeight - EDGE_MARGIN) {
-                    POINT center = { m_screenWidth / 2, m_screenHeight / 2 };
-                    SetCursorPos(center.x, center.y);
-                    m_lastRemoteRawPos = center;
-                }
-            }
-            return 1; // Suppress local cursor
+            // Local cursor suppressed and locked in place! (Raw Input handles delta transmission)
+            return 1;
         }
 
         // Capture button and wheel actions
         MouseInputPayload payload = {};
-        uint16_t normX = static_cast<uint16_t>((m_remoteCurX / m_remoteWidth) * 65535.0);
-        uint16_t normY = static_cast<uint16_t>((m_remoteCurY / m_remoteHeight) * 65535.0);
-        payload.normX = normX;
-        payload.normY = normY;
 
         switch (wParam) {
             case WM_LBUTTONDOWN: payload.flags = MFLAG_LEFT_DOWN; break;
@@ -287,6 +315,7 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
 
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
+
 
 LRESULT InputCapturer::HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     KBDLLHOOKSTRUCT* pKey = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);

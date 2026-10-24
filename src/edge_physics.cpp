@@ -1,4 +1,5 @@
 #include "../include/edge_physics.h"
+#include "../include/input_capturer.h"
 #include <algorithm>
 #include <cmath>
 
@@ -128,6 +129,7 @@ void EdgePhysics::OnRemoteCursorReturned(float normY) {
     }
 
     SetCursorPos(targetX, targetY);
+    InputCapturer::Instance().SyncCursorPos(targetX, targetY);
 
     if (m_onReturn) {
         m_onReturn(m_remoteEdge, normY);

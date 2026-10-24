@@ -1,4 +1,5 @@
 #include "../include/input_injector.h"
+#include "../include/input_capturer.h"
 #include <algorithm>
 #include <cmath>
 
@@ -8,10 +9,14 @@ InputInjector::InputInjector()
       m_entryEdge(EDGE_LEFT),
       m_isActive(false),
       m_accumulatedReturnPush(0.0f),
-      m_entryTime(0) {
+      m_entryTime(0),
+      m_pendingDx(0),
+      m_pendingDy(0),
+      m_pumpRunning(false) {
 }
 
 InputInjector::~InputInjector() {
+    Stop();
 }
 
 void InputInjector::Initialize(int screenW, int screenH, ScreenEdge entryEdge) {
@@ -20,6 +25,80 @@ void InputInjector::Initialize(int screenW, int screenH, ScreenEdge entryEdge) {
     m_entryEdge = entryEdge;
     m_accumulatedReturnPush = 0.0f;
     m_entryTime = 0;
+    m_pendingDx.store(0);
+    m_pendingDy.store(0);
+
+    if (!m_pumpRunning) {
+        m_pumpRunning = true;
+        m_pumpThread = std::thread(&InputInjector::PumpThreadFunc, this);
+    }
+}
+
+void InputInjector::Stop() {
+    if (m_pumpRunning) {
+        m_pumpRunning = false;
+        if (m_pumpThread.joinable()) {
+            m_pumpThread.join();
+        }
+    }
+}
+
+void InputInjector::SetActive(bool active) {
+    m_isActive = active;
+    m_accumulatedReturnPush = 0.0f;
+    m_entryTime = GetTickCount();
+    if (!active) {
+        m_pendingDx.store(0);
+        m_pendingDy.store(0);
+    }
+}
+
+void InputInjector::PumpThreadFunc() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+
+    while (m_pumpRunning) {
+        if (!m_isActive) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        int32_t curDx = m_pendingDx.load(std::memory_order_relaxed);
+        int32_t curDy = m_pendingDy.load(std::memory_order_relaxed);
+
+        if (curDx != 0 || curDy != 0) {
+            // Adaptive Jitter-Free Dispenser:
+            // For normal/small deltas (abs <= 8), dispense 100% immediately for zero latency!
+            // For Wi-Fi packet clumping bursts (abs > 8), dispense 70% per 1ms tick to absorb network jitter
+            int32_t stepDx = 0;
+            if (std::abs(curDx) <= 8) {
+                stepDx = curDx;
+            } else {
+                stepDx = static_cast<int32_t>(curDx * 0.70f);
+                if (stepDx == 0) stepDx = (curDx > 0) ? 1 : -1;
+            }
+
+            int32_t stepDy = 0;
+            if (std::abs(curDy) <= 8) {
+                stepDy = curDy;
+            } else {
+                stepDy = static_cast<int32_t>(curDy * 0.70f);
+                if (stepDy == 0) stepDy = (curDy > 0) ? 1 : -1;
+            }
+
+            m_pendingDx.fetch_sub(stepDx, std::memory_order_relaxed);
+            m_pendingDy.fetch_sub(stepDy, std::memory_order_relaxed);
+
+            INPUT input = {};
+            input.type = INPUT_MOUSE;
+            input.mi.dx = stepDx;
+            input.mi.dy = stepDy;
+            input.mi.dwFlags = MOUSEEVENTF_MOVE;
+            input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
+            SendInput(1, &input, sizeof(INPUT));
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void InputInjector::SetReturnCallback(ReturnBorderCallback onReturn) {
@@ -31,30 +110,27 @@ void InputInjector::PlaceCursorAtEdge(ScreenEdge edge, float normY) {
     m_isActive = true;
     m_accumulatedReturnPush = 0.0f;
     m_entryTime = GetTickCount();
+    m_pendingDx.store(0);
+    m_pendingDy.store(0);
 
     int targetX = m_screenWidth / 2;
     int targetY = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenHeight);
 
-    // Place cursor with 15px margin inside the screen
+    // Place cursor with 25px safe landing margin inside the screen
     if (edge == EDGE_LEFT) {
-        targetX = 15;
+        targetX = 25;
     } else if (edge == EDGE_RIGHT) {
-        targetX = m_screenWidth - 15;
+        targetX = m_screenWidth - 25;
     } else if (edge == EDGE_TOP) {
         targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
-        targetY = 15;
+        targetY = 25;
     } else if (edge == EDGE_BOTTOM) {
         targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
-        targetY = m_screenHeight - 15;
+        targetY = m_screenHeight - 25;
     }
 
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dx = (targetX * 65536) / m_screenWidth;
-    in.mi.dy = (targetY * 65536) / m_screenHeight;
-    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    in.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
-    SendInput(1, &in, sizeof(INPUT));
+    SetCursorPos(targetX, targetY);
+    InputCapturer::Instance().SyncCursorPos(targetX, targetY);
 }
 
 void InputInjector::InjectMouse(const MouseInputPayload& payload) {
@@ -80,6 +156,8 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
 
     if (returning) {
         m_isActive = false;
+        m_pendingDx.store(0);
+        m_pendingDy.store(0);
         if (m_onReturn) {
             float normCoord = (m_entryEdge == EDGE_TOP || m_entryEdge == EDGE_BOTTOM)
                               ? (static_cast<float>(cur.x) / static_cast<float>(m_screenWidth))
@@ -89,15 +167,21 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
         return;
     }
 
-    // 2. Pure Native Relative Hardware Mouse Movement (Zero Jitter, Zero Lag, Native Acceleration)
+    // 2. Feed movement into 0% Jitter Smoothing Pump
     if (payload.flags & MFLAG_MOVE) {
-        INPUT input = {};
-        input.type = INPUT_MOUSE;
-        input.mi.dx = payload.dx;
-        input.mi.dy = payload.dy;
-        input.mi.dwFlags = MOUSEEVENTF_MOVE;
-        input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
-        SendInput(1, &input, sizeof(INPUT));
+        // Immediate direction change: flush opposite pending deltas so user flicking never cancels out!
+        int32_t currentPendingX = m_pendingDx.load(std::memory_order_relaxed);
+        int32_t currentPendingY = m_pendingDy.load(std::memory_order_relaxed);
+
+        if ((currentPendingX > 0 && payload.dx < 0) || (currentPendingX < 0 && payload.dx > 0)) {
+            m_pendingDx.store(0, std::memory_order_relaxed);
+        }
+        if ((currentPendingY > 0 && payload.dy < 0) || (currentPendingY < 0 && payload.dy > 0)) {
+            m_pendingDy.store(0, std::memory_order_relaxed);
+        }
+
+        m_pendingDx.fetch_add(payload.dx, std::memory_order_relaxed);
+        m_pendingDy.fetch_add(payload.dy, std::memory_order_relaxed);
     }
 
     // 3. Button Events
