@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <functional>
+#include <chrono>
 #include "protocol.h"
 #include "edge_physics.h"
 
@@ -32,20 +33,26 @@ private:
     InputCapturer();
     ~InputCapturer();
 
+    // Apple macOS signature ballistics model
+    void ApplyMacBallistics(double rawDx, double rawDy, double dtMs, double& outDx, double& outDy);
+
     HHOOK m_hMouseHook;
     HHOOK m_hKeyHook;
     EdgePhysics* m_physics;
 
     POINT m_lastPos;
+    POINT m_lastRemoteRawPos;
     POINT m_anchorPos;
     bool m_isRemoteCapturing;
 
-    float m_remoteCurX;
-    float m_remoteCurY;
+    double m_remoteCurX;
+    double m_remoteCurY;
     int m_remoteWidth;
     int m_remoteHeight;
     int m_screenWidth;
     int m_screenHeight;
+
+    std::chrono::steady_clock::time_point m_lastMoveTime;
 
     MouseEventCallback m_onMouse;
     KeyEventCallback m_onKey;

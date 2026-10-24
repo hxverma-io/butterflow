@@ -99,8 +99,8 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
     if (payload.flags & MFLAG_MOVE) {
         INPUT input = {};
         input.type = INPUT_MOUSE;
-        input.mi.dx = (static_cast<DWORD>(payload.normX) * 65536) / 65535;
-        input.mi.dy = (static_cast<DWORD>(payload.normY) * 65536) / 65535;
+        input.mi.dx = payload.normX;
+        input.mi.dy = payload.normY;
         input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
         input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
         SendInput(1, &input, sizeof(INPUT));

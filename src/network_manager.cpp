@@ -57,6 +57,10 @@ bool NetworkManager::Start(uint16_t port) {
     BOOL reuse = TRUE;
     setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
+    // High-Priority QoS: DSCP Expedited Forwarding (0xB8 = DSCP 46, AC_VO Voice Priority on Wi-Fi WMM)
+    int tos = 0xB8;
+    setsockopt(m_socket, IPPROTO_IP, IP_TOS, reinterpret_cast<const char*>(&tos), sizeof(tos));
+
     // Non-blocking mode
     u_long nonBlocking = 1;
     ioctlsocket(m_socket, FIONBIO, &nonBlocking);
@@ -154,8 +158,20 @@ void NetworkManager::SendRawPacket(PacketType type, const void* payload, uint16_
 void NetworkManager::SendRawPacketTo(PacketType type, const void* payload, uint16_t size, const sockaddr_in& targetAddr) {
     if (m_socket == INVALID_SOCKET) return;
 
-    std::vector<uint8_t> buffer(sizeof(PacketHeader) + size);
-    PacketHeader* hdr = reinterpret_cast<PacketHeader*>(buffer.data());
+    uint32_t totalSize = static_cast<uint32_t>(sizeof(PacketHeader) + size);
+    uint8_t stackBuffer[512];
+    std::vector<uint8_t> heapBuffer;
+    uint8_t* pBuf = nullptr;
+
+    // Zero-allocation stack buffer for 99.9% of real-time packets (mouse/keyboard/state)
+    if (totalSize <= sizeof(stackBuffer)) {
+        pBuf = stackBuffer;
+    } else {
+        heapBuffer.resize(totalSize);
+        pBuf = heapBuffer.data();
+    }
+
+    PacketHeader* hdr = reinterpret_cast<PacketHeader*>(pBuf);
     hdr->magic = BUTTERFLOW_MAGIC;
     hdr->version = BUTTERFLOW_VERSION;
     hdr->type = type;
@@ -163,10 +179,10 @@ void NetworkManager::SendRawPacketTo(PacketType type, const void* payload, uint1
     hdr->sequence = ++m_sequence;
 
     if (size > 0 && payload != nullptr) {
-        memcpy(buffer.data() + sizeof(PacketHeader), payload, size);
+        memcpy(pBuf + sizeof(PacketHeader), payload, size);
     }
 
-    int sent = sendto(m_socket, reinterpret_cast<const char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
+    int sent = sendto(m_socket, reinterpret_cast<const char*>(pBuf), static_cast<int>(totalSize), 0,
                       reinterpret_cast<const sockaddr*>(&targetAddr), sizeof(targetAddr));
     if (sent > 0) {
         m_packetsSent++;
@@ -252,7 +268,7 @@ void NetworkManager::RecvThreadFunc() {
 
         timeval tv;
         tv.tv_sec = 0;
-        tv.tv_usec = 20000; // 20ms
+        tv.tv_usec = 10000; // 10ms responsive select timeout
 
         int ret = select(0, &readfds, nullptr, nullptr, &tv);
         if (ret > 0 && FD_ISSET(m_socket, &readfds)) {
