@@ -1,4 +1,5 @@
 #include "../include/input_capturer.h"
+#include <vector>
 
 InputCapturer& InputCapturer::Instance() {
     static InputCapturer instance;
@@ -8,18 +9,46 @@ InputCapturer& InputCapturer::Instance() {
 InputCapturer::InputCapturer()
     : m_hMouseHook(nullptr),
       m_hKeyHook(nullptr),
+      m_hwndSink(nullptr),
       m_physics(nullptr),
       m_lastPos({ 0, 0 }),
-      m_isLocked(false) {
+      m_isLocked(false),
+      m_screenW(1920),
+      m_screenH(1080),
+      m_lockedEdge(EDGE_RIGHT) {
 }
 
 InputCapturer::~InputCapturer() {
     UninstallHooks();
 }
 
+LRESULT CALLBACK InputCapturer::RawInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_INPUT) {
+        InputCapturer::Instance().HandleRawInput(lParam);
+        return 0;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
 bool InputCapturer::InstallHooks(EdgePhysics* physics) {
     m_physics = physics;
     GetCursorPos(&m_lastPos);
+
+    // Create message window to receive high-precision unconstrained Raw Input
+    WNDCLASSEXA wx = { sizeof(WNDCLASSEXA) };
+    wx.lpfnWndProc = RawInputWndProc;
+    wx.hInstance = GetModuleHandle(nullptr);
+    wx.lpszClassName = "ButterflowRawSink";
+    RegisterClassExA(&wx);
+
+    m_hwndSink = CreateWindowExA(0, "ButterflowRawSink", "RawSink", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wx.hInstance, nullptr);
+
+    RAWINPUTDEVICE rid = {};
+    rid.usUsagePage = 0x01; // HID_USAGE_PAGE_GENERIC
+    rid.usUsage = 0x02;     // HID_USAGE_GENERIC_MOUSE
+    rid.dwFlags = RIDEV_INPUTSINK;
+    rid.hwndTarget = m_hwndSink;
+    RegisterRawInputDevices(&rid, 1, sizeof(rid));
 
     m_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
     m_hKeyHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
@@ -37,6 +66,10 @@ void InputCapturer::UninstallHooks() {
         UnhookWindowsHookEx(m_hKeyHook);
         m_hKeyHook = nullptr;
     }
+    if (m_hwndSink) {
+        DestroyWindow(m_hwndSink);
+        m_hwndSink = nullptr;
+    }
 }
 
 void InputCapturer::SetCallbacks(MouseEventCallback onMouse, KeyEventCallback onKey, EscapeCallback onEscape) {
@@ -47,13 +80,20 @@ void InputCapturer::SetCallbacks(MouseEventCallback onMouse, KeyEventCallback on
 
 void InputCapturer::LockCursorAtEdge(ScreenEdge edge, int screenW, int screenH) {
     m_isLocked = true;
+    m_screenW = screenW;
+    m_screenH = screenH;
+    m_lockedEdge = edge;
+
     RECT lockRect;
+    int margin = 4;
     if (edge == EDGE_RIGHT) {
-        lockRect = { screenW - 2, 0, screenW - 1, screenH };
+        lockRect = { screenW - margin, 0, screenW, screenH };
     } else if (edge == EDGE_LEFT) {
-        lockRect = { 0, 0, 1, screenH };
+        lockRect = { 0, 0, margin, screenH };
+    } else if (edge == EDGE_TOP) {
+        lockRect = { 0, 0, screenW, margin };
     } else {
-        lockRect = { 0, 0, screenW, screenH };
+        lockRect = { 0, screenH - margin, screenW, screenH };
     }
     ClipCursor(&lockRect);
 }
@@ -61,6 +101,35 @@ void InputCapturer::LockCursorAtEdge(ScreenEdge edge, int screenW, int screenH) 
 void InputCapturer::UnlockCursor() {
     m_isLocked = false;
     ClipCursor(nullptr);
+    GetCursorPos(&m_lastPos);
+}
+
+void InputCapturer::HandleRawInput(LPARAM lParam) {
+    if (!m_physics || m_physics->GetState() != ControlState::REMOTE_ACTIVE) {
+        return;
+    }
+
+    UINT dwSize = 0;
+    GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
+    if (dwSize == 0) return;
+
+    std::vector<BYTE> lpb(dwSize);
+    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, lpb.data(), &dwSize, sizeof(RAWINPUTHEADER)) != dwSize) {
+        return;
+    }
+
+    RAWINPUT* raw = reinterpret_cast<RAWINPUT*>(lpb.data());
+    if (raw->header.dwType == RIM_TYPEMOUSE) {
+        int dx = raw->data.mouse.lLastX;
+        int dy = raw->data.mouse.lLastY;
+        if ((dx != 0 || dy != 0) && m_onMouse) {
+            MouseInputPayload payload = {};
+            payload.flags = MFLAG_MOVE;
+            payload.dx = dx;
+            payload.dy = dy;
+            m_onMouse(payload);
+        }
+    }
 }
 
 LRESULT CALLBACK InputCapturer::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -80,31 +149,21 @@ LRESULT CALLBACK InputCapturer::LowLevelKeyboardProc(int nCode, WPARAM wParam, L
 LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) {
     MSLLHOOKSTRUCT* pMouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-    int dx = pMouse->pt.x - m_lastPos.x;
-    int dy = pMouse->pt.y - m_lastPos.y;
-    m_lastPos = pMouse->pt;
+    // CRITICAL FIX: Ignore any synthetic inputs injected by Butterflow or external software!
+    if ((pMouse->flags & LLMHF_INJECTED) || (pMouse->dwExtraInfo == BUTTERFLOW_EXTRA_INFO_MAGIC)) {
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
 
     bool isRemote = (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
 
-    if (wParam == WM_MOUSEMOVE) {
-        if (m_physics) {
-            bool suppress = m_physics->ProcessLocalMouseMove(pMouse->pt.x, pMouse->pt.y, dx, dy);
-            if (suppress && m_onMouse) {
-                MouseInputPayload payload = {};
-                payload.flags = MFLAG_MOVE;
-                payload.dx = dx;
-                payload.dy = dy;
-                m_onMouse(payload);
-                return 1; // Suppress local cursor
-            }
-        }
-    }
-
     if (isRemote) {
-        MouseInputPayload payload = {};
-        payload.dx = dx;
-        payload.dy = dy;
+        // While controlling remote PC, suppress local mouse movement on host desktop
+        if (wParam == WM_MOUSEMOVE) {
+            return 1;
+        }
 
+        // Capture button and wheel actions
+        MouseInputPayload payload = {};
         switch (wParam) {
             case WM_LBUTTONDOWN: payload.flags = MFLAG_LEFT_DOWN; break;
             case WM_LBUTTONUP:   payload.flags = MFLAG_LEFT_UP;   break;
@@ -134,7 +193,19 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
             m_onMouse(payload);
         }
 
-        return 1; // Suppress click on host PC while controlling remote PC
+        return 1; // Suppress local clicks while controlling remote PC!
+    }
+
+    // Local mode: track mouse coordinates & process boundary physics
+    int dx = pMouse->pt.x - m_lastPos.x;
+    int dy = pMouse->pt.y - m_lastPos.y;
+    m_lastPos = pMouse->pt;
+
+    if (wParam == WM_MOUSEMOVE && m_physics) {
+        bool suppress = m_physics->ProcessLocalMouseMove(pMouse->pt.x, pMouse->pt.y, dx, dy);
+        if (suppress) {
+            return 1; // Handed off to remote screen
+        }
     }
 
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -143,10 +214,15 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
 LRESULT InputCapturer::HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     KBDLLHOOKSTRUCT* pKey = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
+    // CRITICAL FIX: Ignore synthetic keyboard inputs!
+    if ((pKey->flags & LLKHF_INJECTED) || (pKey->dwExtraInfo == BUTTERFLOW_EXTRA_INFO_MAGIC)) {
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
     // Emergency Breakout Key: Ctrl + Alt + Shift + Esc
-    bool isCtrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    bool isAlt  = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    bool isShift= (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    bool isCtrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool isAlt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    bool isShift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
     if (pKey->vkCode == VK_ESCAPE && isCtrl && isAlt && isShift) {
         if (m_onEscape) {

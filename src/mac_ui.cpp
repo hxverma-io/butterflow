@@ -579,6 +579,7 @@ void MacUI::OnMouseDown(int x, int y) {
         if (x >= 775 && x <= 925 && y >= 390 && y <= 430) {
             if (!m_directIpInput.empty() && m_net) {
                 m_net->SetPeerAddress(m_directIpInput, m_net->GetPort());
+                m_net->SendHandshakeRequest();
                 Log("CONNECT", "Directly locked peer to: " + m_directIpInput, Color(255, 48, 209, 88));
                 InvalidateRect(m_hWnd, nullptr, FALSE);
             }
@@ -592,10 +593,12 @@ void MacUI::OnMouseDown(int x, int y) {
             for (const auto& peer : peers) {
                 if (x >= 800 && x <= 920 && y >= py + 12 && y <= py + 48) {
                     if (m_net->HasPeer() && m_net->GetPeerIP() == peer.ip) {
+                        m_net->SendDisconnect();
                         m_net->DisconnectPeer();
                         Log("DISCONNECT", "Disconnected peer " + peer.ip, Color(255, 255, 69, 58));
                     } else {
                         m_net->SetPeerAddress(peer.ip, peer.port);
+                        m_net->SendHandshakeRequest();
                         Log("CONNECT", "Paired with discovered peer: " + std::string(peer.deviceName) + " (" + peer.ip + ")", Color(255, 48, 209, 88));
                     }
                     InvalidateRect(m_hWnd, nullptr, FALSE);
@@ -647,6 +650,7 @@ void MacUI::OnCharInput(char ch) {
 void MacUI::OnKeyDown(WPARAM vk) {
     if (vk == VK_RETURN && m_directIpFocused && !m_directIpInput.empty() && m_net) {
         m_net->SetPeerAddress(m_directIpInput, m_net->GetPort());
+        m_net->SendHandshakeRequest();
         Log("CONNECT", "Directly locked peer to: " + m_directIpInput, Color(255, 48, 209, 88));
         m_directIpFocused = false;
         InvalidateRect(m_hWnd, nullptr, FALSE);

@@ -7,6 +7,8 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
 #include <mutex>
 #include "protocol.h"
 
@@ -37,13 +39,21 @@ public:
 
     void SetPeerAddress(const std::string& ip, uint16_t port = BUTTERFLOW_PORT);
     void DisconnectPeer();
-    bool HasPeer() const { return m_hasPeer; }
-    std::string GetPeerIP() const { return m_peerIpStr; }
-    std::string GetPeerDeviceName() const { return m_peerDeviceName; }
+    bool HasPeer() const;
+    std::string GetPeerIP() const;
+    std::string GetPeerDeviceName() const;
     uint16_t GetPort() const { return m_port; }
+
+    uint64_t GetInstanceId() const { return m_instanceId; }
+    DWORD GetLastPeerActivity() const { return m_lastPeerActivityTick.load(); }
+    void SetLocalDeviceName(const std::string& name) { m_localDeviceName = name; }
 
     // Packet Senders
     void SendDiscoveryBeacon(const DiscoveryPayload& payload);
+    void SendHandshakeRequest();
+    void SendHandshakeAccept();
+    void SendHeartbeat();
+    void SendDisconnect();
     void SendEdgeApproach(ScreenEdge edge, float progress, float normY);
     void SendCursorEnter(ScreenEdge edge, float normX, float normY);
     void SendCursorLeave(float normY);
@@ -51,12 +61,12 @@ public:
     void SendKeyboardInput(const KeyboardInputPayload& payload);
     void SendClipboardText(const std::string& text);
 
-    // Poll / Process Incoming Network Events (non-blocking)
+    // Poll / Process Incoming Network Events (non-blocking fallback)
     void Poll();
 
     // Telemetry & Discovery Info
-    uint64_t GetPacketsSent() const { return m_packetsSent; }
-    uint64_t GetPacketsReceived() const { return m_packetsReceived; }
+    uint64_t GetPacketsSent() const { return m_packetsSent.load(); }
+    uint64_t GetPacketsReceived() const { return m_packetsReceived.load(); }
     std::vector<DiscoveredPeerInfo> GetDiscoveredPeers() const;
     std::string GetLocalIP() const;
 
@@ -71,18 +81,28 @@ public:
 private:
     SOCKET m_socket;
     uint16_t m_port;
+    uint64_t m_instanceId;
+    std::string m_localIpStr;
+    std::string m_localDeviceName;
+
     sockaddr_in m_localAddr;
     sockaddr_in m_peerAddr;
     sockaddr_in m_broadcastAddr;
     bool m_hasPeer;
     std::string m_peerIpStr;
     std::string m_peerDeviceName;
-    uint32_t m_sequence;
-    uint64_t m_packetsSent;
-    uint64_t m_packetsReceived;
+    mutable std::mutex m_peerMutex;
+
+    std::atomic<uint32_t> m_sequence;
+    std::atomic<uint64_t> m_packetsSent;
+    std::atomic<uint64_t> m_packetsReceived;
+    std::atomic<DWORD> m_lastPeerActivityTick;
 
     std::vector<DiscoveredPeerInfo> m_discoveredPeers;
     mutable std::mutex m_peersMutex;
+
+    std::atomic<bool> m_running;
+    std::thread m_recvThread;
 
     ApproachHandler m_onApproach;
     TransitionHandler m_onTransition;
@@ -91,7 +111,10 @@ private:
     LeaveHandler m_onLeave;
     PeerFoundHandler m_onPeerFound;
 
+    void RecvThreadFunc();
+    void ProcessIncomingPacket(const uint8_t* data, int len, const sockaddr_in& senderAddr);
     void SendRawPacket(PacketType type, const void* payload, uint16_t size);
+    void SendRawPacketTo(PacketType type, const void* payload, uint16_t size, const sockaddr_in& targetAddr);
 };
 
 #endif // BUTTERFLOW_NETWORK_MANAGER_H

@@ -22,9 +22,10 @@ public:
     void LockCursorAtEdge(ScreenEdge edge, int screenW, int screenH);
     void UnlockCursor();
 
-    // Internal hook callbacks
+    // Internal hook and Raw Input callbacks
     LRESULT HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam);
     LRESULT HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam);
+    void HandleRawInput(LPARAM lParam);
 
 private:
     InputCapturer();
@@ -32,10 +33,14 @@ private:
 
     HHOOK m_hMouseHook;
     HHOOK m_hKeyHook;
+    HWND m_hwndSink;
     EdgePhysics* m_physics;
 
     POINT m_lastPos;
     bool m_isLocked;
+    int m_screenW;
+    int m_screenH;
+    ScreenEdge m_lockedEdge;
 
     MouseEventCallback m_onMouse;
     KeyEventCallback m_onKey;
@@ -43,6 +48,7 @@ private:
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK RawInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 };
 
 #endif // BUTTERFLOW_INPUT_CAPTURER_H

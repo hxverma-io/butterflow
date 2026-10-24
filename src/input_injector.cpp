@@ -29,15 +29,15 @@ void InputInjector::PlaceCursorAtEdge(ScreenEdge edge, float normY) {
     int targetY = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenHeight);
 
     if (edge == EDGE_LEFT) {
-        targetX = 5;
+        targetX = 10;
     } else if (edge == EDGE_RIGHT) {
-        targetX = m_screenWidth - 5;
+        targetX = m_screenWidth - 10;
     } else if (edge == EDGE_TOP) {
-        targetX = m_screenWidth / 2;
-        targetY = 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
+        targetY = 10;
     } else if (edge == EDGE_BOTTOM) {
-        targetX = m_screenWidth / 2;
-        targetY = m_screenHeight - 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
+        targetY = m_screenHeight - 10;
     }
 
     SetCursorPos(targetX, targetY);
@@ -49,7 +49,7 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
     POINT currentPos;
     GetCursorPos(&currentPos);
 
-    // Check for reverse border crossing back to Host
+    // Check for reverse border crossing back to Host PC
     if (m_entryEdge == EDGE_LEFT && payload.dx < 0 && currentPos.x <= 1) {
         m_isActive = false;
         if (m_onReturn) {
@@ -83,11 +83,12 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
     INPUT input = {};
     input.type = INPUT_MOUSE;
 
-    // Movement
+    // Relative mouse movement
     if (payload.flags & MFLAG_MOVE) {
         input.mi.dx = payload.dx;
         input.mi.dy = payload.dy;
         input.mi.dwFlags = MOUSEEVENTF_MOVE;
+        input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
         SendInput(1, &input, sizeof(INPUT));
     }
 
@@ -97,6 +98,7 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
         in.type = INPUT_MOUSE;
         in.mi.dwFlags = dwFlags;
         in.mi.mouseData = mouseData;
+        in.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
         SendInput(1, &in, sizeof(INPUT));
     };
 
@@ -135,6 +137,7 @@ void InputInjector::InjectKeyboard(const KeyboardInputPayload& payload) {
     input.ki.wVk = payload.vkCode;
     input.ki.wScan = payload.scanCode;
     input.ki.dwFlags = payload.flags;
+    input.ki.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
 
     SendInput(1, &input, sizeof(INPUT));
 }

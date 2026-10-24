@@ -95,7 +95,10 @@ bool EdgeOverlay::Initialize(HINSTANCE hInstance) {
     return true;
 }
 
+#include <thread>
+
 void EdgeOverlay::ShowApproach(ScreenEdge edge, float pushProgress, float normalizedY) {
+    std::lock_guard<std::mutex> lock(m_overlayMutex);
     m_currentEdge = edge;
     m_pushProgress = std::clamp(pushProgress, 0.0f, 1.0f);
     m_normalizedY = std::clamp(normalizedY, 0.05f, 0.95f);
@@ -109,37 +112,49 @@ void EdgeOverlay::ShowApproach(ScreenEdge edge, float pushProgress, float normal
 }
 
 void EdgeOverlay::PlayTransitionBurst(ScreenEdge edge, float normalizedY) {
-    m_currentEdge = edge;
-    m_normalizedY = normalizedY;
-    m_isBursting = true;
-    m_burstRadius = 10.0f;
+    std::thread([this, edge, normalizedY]() {
+        {
+            std::lock_guard<std::mutex> lock(m_overlayMutex);
+            m_currentEdge = edge;
+            m_normalizedY = normalizedY;
+            m_isBursting = true;
+            m_burstRadius = 10.0f;
+        }
 
-    // Quick burst animation
-    for (int frame = 0; frame < 6; ++frame) {
-        m_burstRadius += 12.0f;
-        m_pushProgress = 1.0f - (frame * 0.18f);
-        UpdateLayeredWindowContent();
-        Sleep(16);
-    }
-    Hide();
+        // Quick asynchronous burst animation
+        for (int frame = 0; frame < 6; ++frame) {
+            {
+                std::lock_guard<std::mutex> lock(m_overlayMutex);
+                m_burstRadius += 12.0f;
+                m_pushProgress = 1.0f - (frame * 0.18f);
+                UpdateLayeredWindowContent();
+            }
+            Sleep(16);
+        }
+        Hide();
+    }).detach();
 }
 
 void EdgeOverlay::PlayPreview(ScreenEdge edge) {
-    m_currentEdge = edge;
-    m_normalizedY = 0.5f;
-    m_isBursting = false;
-
-    // Simulated approach pushing inward
-    for (int i = 1; i <= 16; ++i) {
-        m_pushProgress = static_cast<float>(i) / 16.0f;
-        UpdateLayeredWindowContent();
-        Sleep(15);
-    }
-    Sleep(80);
-    PlayTransitionBurst(edge, 0.5f);
+    std::thread([this, edge]() {
+        for (int i = 1; i <= 16; ++i) {
+            {
+                std::lock_guard<std::mutex> lock(m_overlayMutex);
+                m_currentEdge = edge;
+                m_normalizedY = 0.5f;
+                m_isBursting = false;
+                m_pushProgress = static_cast<float>(i) / 16.0f;
+                UpdateLayeredWindowContent();
+            }
+            Sleep(15);
+        }
+        Sleep(80);
+        PlayTransitionBurst(edge, 0.5f);
+    }).detach();
 }
 
 void EdgeOverlay::Hide() {
+    std::lock_guard<std::mutex> lock(m_overlayMutex);
     m_pushProgress = 0.0f;
     m_isBursting = false;
     

@@ -15,7 +15,7 @@ g++ -std=c++17 -O3 ^
     src/input_injector.cpp ^
     src/network_manager.cpp ^
     -o butterflow.exe ^
-    -lws2_32 -lgdiplus -lgdi32 -ldwmapi -lshell32 ^
+    -lws2_32 -lgdiplus -lgdi32 -ldwmapi -lshell32 -lwinmm ^
     -static-libgcc -static-libstdc++ ^
     -mwindows
 

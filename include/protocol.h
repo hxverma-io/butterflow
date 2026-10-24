@@ -8,7 +8,8 @@
 // Butterflow Magic Signature: "BTFL" (0x4C465442 in LE)
 constexpr uint32_t BUTTERFLOW_MAGIC = 0x4C465442;
 constexpr uint16_t BUTTERFLOW_PORT = 54823;
-constexpr uint8_t  BUTTERFLOW_VERSION = 1;
+constexpr uint8_t  BUTTERFLOW_VERSION = 2;
+constexpr uintptr_t BUTTERFLOW_EXTRA_INFO_MAGIC = 0x4254464C; // 'BTFL' in ASCII
 
 enum PacketType : uint8_t {
     PKT_DISCOVERY_BEACON = 0x01,
@@ -52,6 +53,7 @@ struct PacketHeader {
 
 // Auto-discovery beacon
 struct DiscoveryPayload {
+    uint64_t instanceId;    // Unique instance ID to prevent loopback self-discovery
     char     deviceName[32];
     uint16_t screenWidth;
     uint16_t screenHeight;

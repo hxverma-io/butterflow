@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <gdiplus.h>
+#include <mutex>
 #include "protocol.h"
 
 class EdgeOverlay {
@@ -38,6 +39,8 @@ private:
     HDC m_hdcMem;
     HBITMAP m_hBitmap;
     HBITMAP m_hOldBitmap;
+
+    std::mutex m_overlayMutex;
 };
 
 #endif // BUTTERFLOW_EDGE_OVERLAY_H
