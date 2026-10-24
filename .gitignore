@@ -1,0 +1,10 @@
+# Build and object files
+*.o
+*.obj
+*.log
+
+# Editor and IDE directories
+.vscode/
+.idea/
+*.swp
+*.bak

@@ -1,0 +1,25 @@
+name: Build Butterflow Windows Binary
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build with MinGW G++
+      run: |
+        g++ -std=c++17 -O3 -Iinclude src/main.cpp src/edge_overlay.cpp src/edge_physics.cpp src/input_capturer.cpp src/input_injector.cpp src/network_manager.cpp -o butterflow.exe -lws2_32 -lgdiplus -lgdi32 -ldwmapi -static-libgcc -static-libstdc++
+
+    - name: Upload Release Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: butterflow-windows-x64
+        path: butterflow.exe
