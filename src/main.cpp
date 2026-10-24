@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include "../include/protocol.h"
 #include "../include/edge_overlay.h"
 #include "../include/edge_physics.h"
@@ -37,6 +38,9 @@ int main(int argc, char* argv[]) {
             directIp = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        } else if (arg == "--speed" && i + 1 < argc) {
+            float spd = std::stof(argv[++i]);
+            InputCapturer::Instance().SetSpeedMultiplier(std::clamp(spd, 0.5f, 5.0f));
         } else if (arg == "--headless" || arg == "--no-ui") {
             headless = true;
         } else if (arg == "--console") {
@@ -294,8 +298,12 @@ int main(int argc, char* argv[]) {
             lastDecayTime = now;
         }
 
-        // Sleep 1ms to yield CPU while maintaining ultra-low latency with timeBeginPeriod(1)
-        Sleep(1);
+        // Micro-yield during active remote capture for 0ms transmission latency; Sleep(1) during idle local mode
+        if (InputCapturer::Instance().IsRemoteCapturing()) {
+            std::this_thread::yield();
+        } else {
+            Sleep(1);
+        }
     }
 
     InputCapturer::Instance().UninstallHooks();

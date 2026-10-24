@@ -197,13 +197,14 @@ void InputCapturer::HandleRawInputMessage(LPARAM lParam) {
 
         if (rawDx != 0 || rawDy != 0) {
             double dist = std::sqrt(static_cast<double>(rawDx * rawDx + rawDy * rawDy));
-            // macOS Continuous Smooth Super-Fast Curve:
-            // Slow precision: 1.4x (sub-pixel control)
-            // Fast flick: 2.8x (instant cross-screen navigation)
-            double speedFactor = 1.4 + 1.4 * std::tanh(dist / 8.0);
+            // Authentic macOS Pointer Ballistics scaled by user-configured speed multiplier:
+            // Slow precision: 1.0x * m_speedMultiplier (pixel targeting)
+            // Medium/Fast flick: smoothly ramps up to 1.8x * m_speedMultiplier
+            double gain = 1.0 + 0.8 * std::tanh(dist / 6.0);
+            double effectiveMult = static_cast<double>(m_speedMultiplier) * gain;
 
-            double targetDx = (rawDx * speedFactor) + m_subPixelDx;
-            double targetDy = (rawDy * speedFactor) + m_subPixelDy;
+            double targetDx = (rawDx * effectiveMult) + m_subPixelDx;
+            double targetDy = (rawDy * effectiveMult) + m_subPixelDy;
 
             int appliedDx = static_cast<int>(std::round(targetDx));
             int appliedDy = static_cast<int>(std::round(targetDy));

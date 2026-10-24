@@ -56,9 +56,30 @@ void InputInjector::SetActive(bool active) {
 void InputInjector::PumpThreadFunc() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    double countsPerMs = static_cast<double>(freq.QuadPart) / 1000.0;
+
+    LARGE_INTEGER lastTick;
+    QueryPerformanceCounter(&lastTick);
+
     while (m_pumpRunning) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double elapsedMs = (now.QuadPart - lastTick.QuadPart) / countsPerMs;
+
+        if (elapsedMs < 1.0) {
+            if (1.0 - elapsedMs > 1.2) {
+                Sleep(1);
+            } else {
+                std::this_thread::yield();
+            }
+            continue;
+        }
+
+        lastTick = now;
+
         if (!m_isActive) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
@@ -66,22 +87,31 @@ void InputInjector::PumpThreadFunc() {
         int32_t curDy = m_pendingDy.load(std::memory_order_relaxed);
 
         if (curDx != 0 || curDy != 0) {
-            // Adaptive Jitter-Free Dispenser:
-            // For normal/small deltas (abs <= 8), dispense 100% immediately for zero latency!
-            // For Wi-Fi packet clumping bursts (abs > 8), dispense 70% per 1ms tick to absorb network jitter
+            // macOS Butter-Smooth Liquid Glide Curve:
+            // Eliminates Wi-Fi clump pauses by distributing bursts evenly across frame intervals
             int32_t stepDx = 0;
-            if (std::abs(curDx) <= 8) {
-                stepDx = curDx;
+            int32_t absX = std::abs(curDx);
+            if (absX <= 2) {
+                stepDx = curDx; // 100% instant for single/double pixels (0ms latency)
+            } else if (absX <= 6) {
+                stepDx = (curDx > 0) ? (absX + 1) / 2 : -(absX + 1) / 2; // 2-tick interpolation
+            } else if (absX <= 18) {
+                stepDx = (curDx > 0) ? (absX + 2) / 3 : -(absX + 2) / 3; // 3-tick interpolation
             } else {
-                stepDx = static_cast<int32_t>(curDx * 0.70f);
+                stepDx = static_cast<int32_t>(curDx * 0.35f); // Fluid 4-tick glide
                 if (stepDx == 0) stepDx = (curDx > 0) ? 1 : -1;
             }
 
             int32_t stepDy = 0;
-            if (std::abs(curDy) <= 8) {
+            int32_t absY = std::abs(curDy);
+            if (absY <= 2) {
                 stepDy = curDy;
+            } else if (absY <= 6) {
+                stepDy = (curDy > 0) ? (absY + 1) / 2 : -(absY + 1) / 2;
+            } else if (absY <= 18) {
+                stepDy = (curDy > 0) ? (absY + 2) / 3 : -(absY + 2) / 3;
             } else {
-                stepDy = static_cast<int32_t>(curDy * 0.70f);
+                stepDy = static_cast<int32_t>(curDy * 0.35f);
                 if (stepDy == 0) stepDy = (curDy > 0) ? 1 : -1;
             }
 
@@ -96,8 +126,6 @@ void InputInjector::PumpThreadFunc() {
             input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
             SendInput(1, &input, sizeof(INPUT));
         }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

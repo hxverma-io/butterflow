@@ -1,4 +1,5 @@
 #include "../include/mac_ui.h"
+#include "../include/input_capturer.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -52,6 +53,7 @@ MacUI::MacUI()
       m_pushThroughEnabled(true),
       m_edgeBubbleEnabled(true),
       m_springTension(35.0f),
+      m_mouseSpeed(1.4f),
       m_isDraggingMonitor(false),
       m_isDraggingSlider(false),
       m_dragOffset(0.0f, 0.0f),
@@ -211,6 +213,15 @@ void MacUI::SetConfiguredEdge(ScreenEdge edge) {
     std::string edgeName = (edge == EDGE_RIGHT ? "RIGHT" : (edge == EDGE_LEFT ? "LEFT" : (edge == EDGE_TOP ? "TOP" : "BOTTOM")));
     Log("ARRANGEMENT", "Boundary re-anchored to " + edgeName + " display edge.", Color(255, 0, 122, 255));
     InvalidateRect(m_hWnd, nullptr, FALSE);
+}
+
+void MacUI::SetMouseSpeed(float speed) {
+    m_mouseSpeed = std::clamp(speed, 0.5f, 3.5f);
+    InputCapturer::Instance().SetSpeedMultiplier(m_mouseSpeed);
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(1) << m_mouseSpeed;
+    Log("SPEED", "Cursor speed set to " + ss.str() + "x", Color(255, 10, 132, 255));
+    if (m_hWnd) InvalidateRect(m_hWnd, nullptr, FALSE);
 }
 
 void MacUI::Log(const std::string& tag, const std::string& text, Color color) {
@@ -458,15 +469,13 @@ void MacUI::OnMouseMove(int x, int y) {
         if (oldEdge != m_hoveredEdgeBtn) InvalidateRect(m_hWnd, nullptr, FALSE);
     }
 
-    // 4. Handle slider dragging
+    // 4. Handle slider dragging (Cursor Speed & Sensitivity)
     if (m_isDraggingSlider && m_activeTab == 0) {
         float sliderX = 665.0f;
         float sliderW = 245.0f;
         float ratio = std::clamp((static_cast<float>(x) - sliderX) / sliderW, 0.0f, 1.0f);
-        m_springTension = 15.0f + ratio * (65.0f - 15.0f);
-        if (m_physics) {
-            m_physics->SetPushThreshold(m_springTension);
-        }
+        m_mouseSpeed = 0.5f + ratio * (3.5f - 0.5f);
+        InputCapturer::Instance().SetSpeedMultiplier(m_mouseSpeed);
     }
 
     if (oldLight != m_hoveredTrafficLight || oldTab != m_hoveredTab) {
@@ -551,14 +560,14 @@ void MacUI::OnMouseDown(int x, int y) {
             }
         }
 
-        // Spring tension slider (Card 3: x=660 to 955, y=540 to 645)
+        // Cursor speed slider (Card 3: x=660 to 955, y=540 to 645)
         if (x >= 660 && x <= 955 && y >= 580 && y <= 630) {
             m_isDraggingSlider = true;
             float sliderX = 665.0f;
             float sliderW = 245.0f;
             float ratio = std::clamp((static_cast<float>(x) - sliderX) / sliderW, 0.0f, 1.0f);
-            m_springTension = 15.0f + ratio * (65.0f - 15.0f);
-            if (m_physics) m_physics->SetPushThreshold(m_springTension);
+            m_mouseSpeed = 0.5f + ratio * (3.5f - 0.5f);
+            InputCapturer::Instance().SetSpeedMultiplier(m_mouseSpeed);
             InvalidateRect(m_hWnd, nullptr, FALSE);
             return;
         }
@@ -648,6 +657,25 @@ void MacUI::OnCharInput(char ch) {
 }
 
 void MacUI::OnKeyDown(WPARAM vk) {
+    bool isCtrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (isCtrl && (vk == VK_OEM_PLUS || vk == VK_ADD)) {
+        m_mouseSpeed = std::clamp(m_mouseSpeed + 0.2f, 0.5f, 3.5f);
+        InputCapturer::Instance().SetSpeedMultiplier(m_mouseSpeed);
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(1) << m_mouseSpeed;
+        Log("SPEED", "Cursor speed increased to " + ss.str() + "x", Color(255, 10, 132, 255));
+        InvalidateRect(m_hWnd, nullptr, FALSE);
+        return;
+    } else if (isCtrl && (vk == VK_OEM_MINUS || vk == VK_SUBTRACT)) {
+        m_mouseSpeed = std::clamp(m_mouseSpeed - 0.2f, 0.5f, 3.5f);
+        InputCapturer::Instance().SetSpeedMultiplier(m_mouseSpeed);
+        std::ostringstream ss;
+        ss << std::fixed << std::setprecision(1) << m_mouseSpeed;
+        Log("SPEED", "Cursor speed decreased to " + ss.str() + "x", Color(255, 10, 132, 255));
+        InvalidateRect(m_hWnd, nullptr, FALSE);
+        return;
+    }
+
     if (vk == VK_RETURN && m_directIpFocused && !m_directIpInput.empty() && m_net) {
         m_net->SetPeerAddress(m_directIpInput, m_net->GetPort());
         m_net->SendHandshakeRequest();
@@ -1146,11 +1174,11 @@ void MacUI::RenderTabArrangement(Graphics& g, int w, int h) {
     SolidBrush btnText(Color(255, 255, 255, 255));
     g.DrawString(L"Preview Bubble ✨", -1, &fontBtn, PointF(testBtn.X + testBtn.Width / 2.0f, testBtn.Y + testBtn.Height / 2.0f), &sfCenter, &btnText);
 
-    // Card 3: Apple Spring Resistance Slider
+    // Card 3: Apple Cursor Speed & Sensitivity Slider
     RectF c3(30.0f + (cardW + 12.0f) * 2.0f, cardY, cardW, cardH);
     DrawRoundedCard(g, c3, 12.0f, Color(255, 28, 28, 34), Color(40, 255, 255, 255));
-    DrawCupertinoSlider(g, c3.X + 16.0f, c3.Y + 20.0f, c3.Width - 32.0f, m_springTension, 15.0f, 65.0f, "Push Resistance (Spring)", "px");
-    std::wstring presetStr = (m_springTension < 25.0f) ? L"Sensitivity: Light" : (m_springTension > 45.0f ? L"Sensitivity: Firm" : L"Sensitivity: Apple Default (Balanced)");
+    DrawCupertinoSlider(g, c3.X + 16.0f, c3.Y + 20.0f, c3.Width - 32.0f, m_mouseSpeed, 0.5f, 3.5f, "Cursor Speed / Sensitivity", "x");
+    std::wstring presetStr = (m_mouseSpeed < 1.0f) ? L"Speed: Slow (High Precision)" : (m_mouseSpeed > 2.0f ? L"Speed: Fast (Multi-Monitor)" : L"Speed: macOS Natural (Balanced)");
     g.DrawString(presetStr.c_str(), -1, &fontTip, PointF(c3.X + 16.0f, c3.Y + 76.0f), &tipBrush);
 }
 

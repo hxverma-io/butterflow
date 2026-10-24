@@ -28,6 +28,7 @@ public:
 
     void SetSpeedMultiplier(float mult) { m_speedMultiplier = mult; }
     float GetSpeedMultiplier() const { return m_speedMultiplier; }
+    bool IsRemoteCapturing() const { return m_isRemoteCapturing; }
 
     // Internal hook callbacks
     LRESULT HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam);

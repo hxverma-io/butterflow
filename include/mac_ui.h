@@ -51,6 +51,9 @@ public:
     void SetConfiguredEdge(ScreenEdge edge);
     ScreenEdge GetConfiguredEdge() const { return m_configuredEdge; }
 
+    void SetMouseSpeed(float speed);
+    float GetMouseSpeed() const { return m_mouseSpeed; }
+
 private:
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -113,6 +116,7 @@ private:
     bool m_pushThroughEnabled;
     bool m_edgeBubbleEnabled;
     float m_springTension; // 15.0 to 65.0
+    float m_mouseSpeed;    // 0.5 to 3.5
     bool m_isDraggingMonitor;
     bool m_isDraggingSlider;
     Gdiplus::PointF m_dragOffset;
