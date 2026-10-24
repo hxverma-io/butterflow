@@ -22,7 +22,10 @@ InputCapturer::InputCapturer()
       m_screenWidth(1920),
       m_screenHeight(1080),
       m_lastMoveTime(std::chrono::steady_clock::now()),
-      m_companionPhysicalDelta(0) {
+      m_companionPhysicalDelta(0),
+      m_speedMultiplier(2.2f),
+      m_subPixelDx(0.0),
+      m_subPixelDy(0.0) {
 }
 
 InputCapturer::~InputCapturer() {
@@ -123,12 +126,16 @@ void InputCapturer::StartRemoteCapture(ScreenEdge targetEdge, float normY, int r
     m_lastRemoteRawPos = m_anchorPos;
     m_lastPos = m_anchorPos;
     m_lastMoveTime = std::chrono::steady_clock::now();
+    m_subPixelDx = 0.0;
+    m_subPixelDy = 0.0;
 }
 
 void InputCapturer::StopRemoteCapture() {
     m_isRemoteCapturing = false;
     GetCursorPos(&m_lastPos);
     m_lastRemoteRawPos = m_lastPos;
+    m_subPixelDx = 0.0;
+    m_subPixelDy = 0.0;
 }
 
 LRESULT CALLBACK InputCapturer::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -184,11 +191,34 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
             m_lastRemoteRawPos = pMouse->pt;
 
             if (dx != 0 || dy != 0) {
-                if (m_onMouse) {
+                // Super Fast Cursor Boost with Sub-Pixel Fractional Accumulation
+                double dist = std::sqrt(static_cast<double>(dx * dx + dy * dy));
+
+                // Dynamic speed curve:
+                // Base 2.2x speed multiplier with dynamic momentum scaling
+                // Micro precision (dist <= 2px): 1.54x (smooth fine control)
+                // Fast flicks (dist > 6px): 2.75x (super fast screen traversal)
+                double speedFactor = m_speedMultiplier;
+                if (dist <= 2.0) {
+                    speedFactor = m_speedMultiplier * 0.70;
+                } else if (dist > 6.0) {
+                    speedFactor = m_speedMultiplier * 1.25;
+                }
+
+                double targetDx = (dx * speedFactor) + m_subPixelDx;
+                double targetDy = (dy * speedFactor) + m_subPixelDy;
+
+                int appliedDx = static_cast<int>(std::round(targetDx));
+                int appliedDy = static_cast<int>(std::round(targetDy));
+
+                m_subPixelDx = targetDx - appliedDx;
+                m_subPixelDy = targetDy - appliedDy;
+
+                if (m_onMouse && (appliedDx != 0 || appliedDy != 0)) {
                     MouseInputPayload payload = {};
                     payload.flags = MFLAG_MOVE;
-                    payload.dx = static_cast<int16_t>(dx);
-                    payload.dy = static_cast<int16_t>(dy);
+                    payload.dx = static_cast<int16_t>(appliedDx);
+                    payload.dy = static_cast<int16_t>(appliedDy);
                     m_onMouse(payload);
                 }
 

@@ -25,6 +25,9 @@ public:
     void StartRemoteCapture(ScreenEdge targetEdge, float normY, int remoteW = 1920, int remoteH = 1080);
     void StopRemoteCapture();
 
+    void SetSpeedMultiplier(float mult) { m_speedMultiplier = mult; }
+    float GetSpeedMultiplier() const { return m_speedMultiplier; }
+
     // Internal hook callbacks
     LRESULT HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam);
     LRESULT HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam);
@@ -59,6 +62,9 @@ private:
     EscapeCallback m_onEscape;
     InterventionCallback m_onIntervention;
     int m_companionPhysicalDelta;
+    float m_speedMultiplier;
+    double m_subPixelDx;
+    double m_subPixelDy;
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
