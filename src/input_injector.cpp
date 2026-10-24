@@ -64,6 +64,20 @@ void InputInjector::InjectMouse(const MouseInputPayload& payload) {
             m_onReturn(normY);
         }
         return;
+    } else if (m_entryEdge == EDGE_TOP && payload.dy < 0 && currentPos.y <= 1) {
+        m_isActive = false;
+        if (m_onReturn) {
+            float normX = static_cast<float>(currentPos.x) / static_cast<float>(m_screenWidth);
+            m_onReturn(normX);
+        }
+        return;
+    } else if (m_entryEdge == EDGE_BOTTOM && payload.dy > 0 && currentPos.y >= m_screenHeight - 2) {
+        m_isActive = false;
+        if (m_onReturn) {
+            float normX = static_cast<float>(currentPos.x) / static_cast<float>(m_screenWidth);
+            m_onReturn(normX);
+        }
+        return;
     }
 
     INPUT input = {};

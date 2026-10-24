@@ -6,8 +6,11 @@
 
 NetworkManager::NetworkManager()
     : m_socket(INVALID_SOCKET),
+      m_port(BUTTERFLOW_PORT),
       m_hasPeer(false),
-      m_sequence(0) {
+      m_sequence(0),
+      m_packetsSent(0),
+      m_packetsReceived(0) {
     memset(&m_localAddr, 0, sizeof(m_localAddr));
     memset(&m_peerAddr, 0, sizeof(m_peerAddr));
     memset(&m_broadcastAddr, 0, sizeof(m_broadcastAddr));
@@ -18,6 +21,7 @@ NetworkManager::~NetworkManager() {
 }
 
 bool NetworkManager::Start(uint16_t port) {
+    m_port = port;
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return false;
@@ -79,6 +83,12 @@ void NetworkManager::SetPeerAddress(const std::string& ip, uint16_t port) {
     m_hasPeer = true;
 }
 
+void NetworkManager::DisconnectPeer() {
+    m_hasPeer = false;
+    m_peerIpStr = "";
+    m_peerDeviceName = "";
+}
+
 void NetworkManager::SendRawPacket(PacketType type, const void* payload, uint16_t size) {
     if (m_socket == INVALID_SOCKET || !m_hasPeer) return;
 
@@ -94,8 +104,11 @@ void NetworkManager::SendRawPacket(PacketType type, const void* payload, uint16_
         memcpy(buffer.data() + sizeof(PacketHeader), payload, size);
     }
 
-    sendto(m_socket, reinterpret_cast<const char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
-           reinterpret_cast<sockaddr*>(&m_peerAddr), sizeof(m_peerAddr));
+    int sent = sendto(m_socket, reinterpret_cast<const char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
+                      reinterpret_cast<sockaddr*>(&m_peerAddr), sizeof(m_peerAddr));
+    if (sent > 0) {
+        m_packetsSent++;
+    }
 }
 
 void NetworkManager::SendDiscoveryBeacon(const DiscoveryPayload& payload) {
@@ -111,8 +124,11 @@ void NetworkManager::SendDiscoveryBeacon(const DiscoveryPayload& payload) {
 
     memcpy(buffer.data() + sizeof(PacketHeader), &payload, sizeof(DiscoveryPayload));
 
-    sendto(m_socket, reinterpret_cast<const char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
-           reinterpret_cast<sockaddr*>(&m_broadcastAddr), sizeof(m_broadcastAddr));
+    int sent = sendto(m_socket, reinterpret_cast<const char*>(buffer.data()), static_cast<int>(buffer.size()), 0,
+                      reinterpret_cast<sockaddr*>(&m_broadcastAddr), sizeof(m_broadcastAddr));
+    if (sent > 0) {
+        m_packetsSent++;
+    }
 }
 
 void NetworkManager::SendEdgeApproach(ScreenEdge edge, float progress, float normY) {
@@ -166,6 +182,7 @@ void NetworkManager::Poll() {
             continue;
         }
 
+        m_packetsReceived++;
         const uint8_t* payloadPtr = recvBuffer + sizeof(PacketHeader);
 
         switch (hdr->type) {
@@ -176,6 +193,33 @@ void NetworkManager::Poll() {
                     
                     const DiscoveryPayload* discovery = reinterpret_cast<const DiscoveryPayload*>(payloadPtr);
                     
+                    {
+                        std::lock_guard<std::mutex> lock(m_peersMutex);
+                        bool found = false;
+                        for (auto& peer : m_discoveredPeers) {
+                            if (peer.ip == senderIp) {
+                                peer.lastSeenTick = GetTickCount();
+                                peer.screenWidth = discovery->screenWidth;
+                                peer.screenHeight = discovery->screenHeight;
+                                peer.preferredEdge = discovery->preferredEdge;
+                                strncpy(peer.deviceName, discovery->deviceName, sizeof(peer.deviceName) - 1);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            DiscoveredPeerInfo newPeer = {};
+                            newPeer.ip = senderIp;
+                            newPeer.port = ntohs(senderAddr.sin_port);
+                            strncpy(newPeer.deviceName, discovery->deviceName, sizeof(newPeer.deviceName) - 1);
+                            newPeer.screenWidth = discovery->screenWidth;
+                            newPeer.screenHeight = discovery->screenHeight;
+                            newPeer.preferredEdge = discovery->preferredEdge;
+                            newPeer.lastSeenTick = GetTickCount();
+                            m_discoveredPeers.push_back(newPeer);
+                        }
+                    }
+
                     if (m_onPeerFound) {
                         m_onPeerFound(senderIp, *discovery);
                     }
@@ -183,6 +227,9 @@ void NetworkManager::Poll() {
                     // Auto-reply with response if we don't have peer locked yet
                     if (!m_hasPeer) {
                         SetPeerAddress(senderIp, ntohs(senderAddr.sin_port));
+                        m_peerDeviceName = discovery->deviceName;
+                    } else if (m_peerIpStr == senderIp) {
+                        m_peerDeviceName = discovery->deviceName;
                     }
                 }
                 break;
@@ -249,4 +296,26 @@ void NetworkManager::Poll() {
                 break;
         }
     }
+}
+
+std::vector<DiscoveredPeerInfo> NetworkManager::GetDiscoveredPeers() const {
+    std::lock_guard<std::mutex> lock(m_peersMutex);
+    return m_discoveredPeers;
+}
+
+std::string NetworkManager::GetLocalIP() const {
+    char hostname[256];
+    if (gethostname(hostname, sizeof(hostname)) == 0) {
+        addrinfo hints = {}, *info = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        if (getaddrinfo(hostname, nullptr, &hints, &info) == 0 && info != nullptr) {
+            char ipStr[INET_ADDRSTRLEN];
+            sockaddr_in* addr = reinterpret_cast<sockaddr_in*>(info->ai_addr);
+            inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr));
+            freeaddrinfo(info);
+            return std::string(ipStr);
+        }
+    }
+    return "127.0.0.1";
 }

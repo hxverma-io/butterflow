@@ -9,7 +9,8 @@ EdgePhysics::EdgePhysics()
       m_state(ControlState::LOCAL_ACTIVE),
       m_accumulatedPush(0.0f),
       m_pushThreshold(35.0f), // 35 pixels of deliberate continuous displacement
-      m_lastPushTime(0) {
+      m_lastPushTime(0),
+      m_pushThroughEnabled(true) {
 }
 
 void EdgePhysics::Configure(ScreenEdge remoteEdge, int screenW, int screenH) {
@@ -30,6 +31,10 @@ bool EdgePhysics::ProcessLocalMouseMove(int x, int y, int dx, int dy) {
     if (m_state == ControlState::REMOTE_ACTIVE) {
         // Entirely suppressed locally; transmitted to remote peer
         return true;
+    }
+
+    if (!m_pushThroughEnabled) {
+        return false;
     }
 
     bool atBorder = false;
@@ -121,8 +126,20 @@ void EdgePhysics::OnRemoteCursorReturned(float normY) {
     m_accumulatedPush = 0.0f;
 
     // Reposition local cursor at the matching edge
-    int targetX = (m_remoteEdge == EDGE_RIGHT) ? (m_screenWidth - 5) : 5;
+    int targetX = m_screenWidth / 2;
     int targetY = static_cast<int>(normY * m_screenHeight);
+
+    if (m_remoteEdge == EDGE_RIGHT) {
+        targetX = m_screenWidth - 5;
+    } else if (m_remoteEdge == EDGE_LEFT) {
+        targetX = 5;
+    } else if (m_remoteEdge == EDGE_TOP) {
+        targetX = static_cast<int>(normY * m_screenWidth);
+        targetY = 5;
+    } else if (m_remoteEdge == EDGE_BOTTOM) {
+        targetX = static_cast<int>(normY * m_screenWidth);
+        targetY = m_screenHeight - 5;
+    }
     SetCursorPos(targetX, targetY);
 
     if (m_onReturn) {

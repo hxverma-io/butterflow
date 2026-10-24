@@ -2,12 +2,14 @@
 #include <windows.h>
 #include <iostream>
 #include <string>
+#include <vector>
 #include "../include/protocol.h"
 #include "../include/edge_overlay.h"
 #include "../include/edge_physics.h"
 #include "../include/input_capturer.h"
 #include "../include/input_injector.h"
 #include "../include/network_manager.h"
+#include "../include/mac_ui.h"
 
 int main(int argc, char* argv[]) {
     // Enable DPI awareness for multi-monitor pixel accuracy
@@ -16,6 +18,8 @@ int main(int argc, char* argv[]) {
     ScreenEdge configuredEdge = EDGE_RIGHT; // Default: Peer is to the right
     std::string directIp = "";
     uint16_t port = BUTTERFLOW_PORT;
+    bool headless = false;
+    bool attachConsole = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -29,6 +33,18 @@ int main(int argc, char* argv[]) {
             directIp = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        } else if (arg == "--headless" || arg == "--no-ui") {
+            headless = true;
+        } else if (arg == "--console") {
+            attachConsole = true;
+        }
+    }
+
+    if (attachConsole || headless) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* fp;
+            freopen_s(&fp, "CONOUT$", "w", stdout);
+            freopen_s(&fp, "CONOUT$", "w", stderr);
         }
     }
 
@@ -36,18 +52,18 @@ int main(int argc, char* argv[]) {
     int screenH = GetSystemMetrics(SM_CYSCREEN);
 
     std::cout << "=======================================================\n";
-    std::cout << "  BUTTERFLOW: Universal Control Engine for Windows\n";
+    std::cout << "  BUTTERFLOW: macOS Universal Control for Windows\n";
     std::cout << "  Reverse-Engineered Clean-Room Native Implementation\n";
     std::cout << "=======================================================\n";
     std::cout << "  Screen Geometry : " << screenW << "x" << screenH << "\n";
-    std::cout << "  Remote Edge     : " << (configuredEdge == EDGE_RIGHT ? "RIGHT" : (configuredEdge == EDGE_LEFT ? "LEFT" : "OTHER")) << "\n";
+    std::cout << "  Remote Edge     : " << (configuredEdge == EDGE_RIGHT ? "RIGHT" : (configuredEdge == EDGE_LEFT ? "LEFT" : (configuredEdge == EDGE_TOP ? "TOP" : "BOTTOM"))) << "\n";
     std::cout << "  Port            : " << port << "\n";
     std::cout << "  Breakout Key    : Ctrl + Alt + Shift + Esc\n";
     std::cout << "=======================================================\n";
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 
-    // 1. Initialize Visual Apple Edge Bubble
+    // 1. Initialize Visual Apple Edge Bubble Overlay
     EdgeOverlay overlay;
     if (!overlay.Initialize(hInstance)) {
         std::cerr << "[-] Failed to initialize Apple Edge Overlay subsystem.\n";
@@ -60,7 +76,7 @@ int main(int argc, char* argv[]) {
 
     // 3. Initialize Input Injector
     InputInjector injector;
-    ScreenEdge entryEdge = (configuredEdge == EDGE_RIGHT) ? EDGE_LEFT : EDGE_RIGHT;
+    ScreenEdge entryEdge = (configuredEdge == EDGE_RIGHT) ? EDGE_LEFT : (configuredEdge == EDGE_LEFT ? EDGE_RIGHT : (configuredEdge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
     injector.Initialize(screenW, screenH, entryEdge);
 
     // 4. Initialize Networking
@@ -70,32 +86,49 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // 5. Initialize macOS Universal Control GUI
+    MacUI ui;
+    if (!headless) {
+        if (!ui.Initialize(hInstance, &physics, &overlay, &injector, &net, configuredEdge)) {
+            std::cerr << "[-] Failed to initialize macOS Universal Control GUI.\n";
+        } else {
+            ui.Show();
+        }
+    }
+
     if (!directIp.empty()) {
         std::cout << "[+] Connecting directly to target peer: " << directIp << "\n";
         net.SetPeerAddress(directIp, port);
+        ui.Log("CONNECT", "Connecting directly to target peer: " + directIp, Gdiplus::Color(255, 10, 132, 255));
     } else {
         std::cout << "[+] Auto-Discovery active: Broadcasting beacon on local subnet...\n";
+        ui.Log("DISCOVERY", "Auto-Discovery active: broadcasting beacon on subnet...", Gdiplus::Color(255, 10, 132, 255));
     }
 
     // Setup Network Callbacks
     net.SetPeerFoundHandler([&](const std::string& peerIp, const DiscoveryPayload& disc) {
         std::cout << "[+] Discovered nearby Windows peer: " << disc.deviceName 
                   << " (" << peerIp << ") Screen: " << disc.screenWidth << "x" << disc.screenHeight << "\n";
+        ui.Log("DISCOVERY", "Discovered nearby peer: " + std::string(disc.deviceName) + " (" + peerIp + ")", Gdiplus::Color(255, 48, 209, 88));
     });
 
     net.SetApproachHandler([&](const EdgeApproachPayload& approach) {
         // Display the Apple-style incoming bubble on our screen edge!
-        overlay.ShowApproach(static_cast<ScreenEdge>(approach.edge), approach.pushProgress, approach.normalizedY);
+        if (ui.GetConfiguredEdge() == approach.edge || true) {
+            overlay.ShowApproach(static_cast<ScreenEdge>(approach.edge), approach.pushProgress, approach.normalizedY);
+        }
     });
 
     net.SetTransitionHandler([&](const CursorTransitionPayload& trans) {
         overlay.PlayTransitionBurst(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
         injector.PlaceCursorAtEdge(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
+        ui.Log("STREAM", "Remote cursor entered local screen display.", Gdiplus::Color(255, 175, 82, 222));
     });
 
     net.SetLeaveHandler([&](float normY) {
         physics.OnRemoteCursorReturned(normY);
         InputCapturer::Instance().UnlockCursor();
+        ui.Log("STREAM", "Remote cursor left back to host PC.", Gdiplus::Color(255, 10, 132, 255));
     });
 
     net.SetMouseHandler([&](const MouseInputPayload& mouse) {
@@ -111,21 +144,23 @@ int main(int argc, char* argv[]) {
         [&](ScreenEdge edge, float progress, float normY) {
             // Local push against edge: send approach update to peer
             if (net.HasPeer()) {
-                ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : EDGE_RIGHT;
+                ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : (edge == EDGE_LEFT ? EDGE_RIGHT : (edge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
                 net.SendEdgeApproach(targetEdge, progress, normY);
             }
         },
         [&](ScreenEdge edge, float normY) {
             // Local cursor broke through barrier: lock cursor and notify peer
             std::cout << "[*] Cursor crossed boundary onto remote PC.\n";
+            ui.Log("HANDOFF", "Pointer crossed boundary onto remote PC screen.", Gdiplus::Color(255, 0, 180, 255));
             InputCapturer::Instance().LockCursorAtEdge(edge, screenW, screenH);
             if (net.HasPeer()) {
-                ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : EDGE_RIGHT;
+                ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : (edge == EDGE_LEFT ? EDGE_RIGHT : (edge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
                 net.SendCursorEnter(targetEdge, 0.0f, normY);
             }
         },
         [&](ScreenEdge edge, float normY) {
             std::cout << "[*] Cursor returned to local PC.\n";
+            ui.Log("HANDOFF", "Pointer returned to local PC.", Gdiplus::Color(255, 48, 209, 88));
             InputCapturer::Instance().UnlockCursor();
             overlay.Hide();
         }
@@ -137,9 +172,10 @@ int main(int argc, char* argv[]) {
         net.SendCursorLeave(normY);
     });
 
-    // 5. Install Low-Level Input Hooks
+    // 6. Install Low-Level Input Hooks
     if (!InputCapturer::Instance().InstallHooks(&physics)) {
         std::cerr << "[-] Failed to install Windows low-level input hooks.\n";
+        ui.Log("ERROR", "Failed to install Windows low-level input hooks.", Gdiplus::Color(255, 255, 69, 58));
         return 1;
     }
 
@@ -152,13 +188,14 @@ int main(int argc, char* argv[]) {
         },
         [&]() {
             std::cout << "[!] Emergency Breakout triggered. Resetting control to local PC.\n";
+            ui.Log("SAFETY", "Emergency Breakout triggered: cursor released to local PC.", Gdiplus::Color(255, 255, 69, 58));
             physics.ResetToLocal();
             InputCapturer::Instance().UnlockCursor();
             overlay.Hide();
         }
     );
 
-    std::cout << "[+] Butterflow engine active and running. Press Ctrl+C in console to exit.\n";
+    std::cout << "[+] Butterflow macOS Universal Control engine active and running.\n";
 
     // Prepare Discovery Beacon
     DiscoveryPayload beacon = {};
@@ -174,7 +211,7 @@ int main(int argc, char* argv[]) {
     // High-performance real-time event loop
     MSG msg;
     bool running = true;
-    while (running) {
+    while (running && (headless || ui.IsRunning())) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 running = false;
@@ -188,6 +225,7 @@ int main(int argc, char* argv[]) {
 
         // 1. Send Discovery Beacon every 2 seconds if no peer confirmed
         if (!net.HasPeer() && now - lastBeaconTime > 2000) {
+            beacon.preferredEdge = ui.GetConfiguredEdge();
             net.SendDiscoveryBeacon(beacon);
             lastBeaconTime = now;
         }

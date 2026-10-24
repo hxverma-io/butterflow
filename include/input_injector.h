@@ -21,6 +21,8 @@ public:
 
     void SetActive(bool active) { m_isActive = active; }
     bool IsActive() const { return m_isActive; }
+    void SetEntryEdge(ScreenEdge entryEdge) { m_entryEdge = entryEdge; }
+    ScreenEdge GetEntryEdge() const { return m_entryEdge; }
 
 private:
     int m_screenWidth;

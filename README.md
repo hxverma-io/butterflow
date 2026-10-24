@@ -28,25 +28,37 @@ Butterflow allows two or more Windows PCs to share a single mouse and keyboard s
 
 ---
 
-## How to Run
+## macOS Universal Control User Interface
 
-### Setup: Two Windows PCs on the Same Network
+When opening `butterflow.exe`, Butterflow launches an authentic, state-of-the-art **macOS Universal Control** native interface designed with Apple's iconic design language:
 
-Copy `butterflow.exe` to both Windows PCs (PC-A and PC-B). Both PCs must be on the same local network (connected to the same Wi-Fi router, Ethernet switch, or one connected to the other's Mobile Hotspot).
-
-#### Machine 1 (Left PC):
-```cmd
-butterflow.exe --edge right
-```
-*(Tells Machine 1 that the other PC is located physically to its right)*
-
-#### Machine 2 (Right PC):
-```cmd
-butterflow.exe --edge left
-```
-*(Tells Machine 2 that Machine 1 is located physically to its left)*
+* **Dark Frosted Glass & Titanium Aesthetics**: Double-buffered GDI+ hardware-rendered interface with macOS dark mode colors, specular rim borders, and Windows 11 rounded corners (`DwmSetWindowAttribute`).
+* **Authentic macOS Traffic Light Controls**: Interactive Close (Red), Minimize (Yellow), and Zoom (Green) controls with authentic glyph hovers and system tray integration.
+* **Interactive Displays Arrangement Canvas**:
+  - Live hardware monitor mockups for **This PC** and **Remote Companion PC**.
+  - Interactive edge positioning: Click or arrange displays to the **Left**, **Right**, **Top**, or **Bottom** to mirror your real-world desk setup.
+  - **Dynamic Universal Control Linking Beam**: An animated glowing Apple-cyan gradient wave pulsing along the active display boundary.
+* **Cupertino Control Cards**:
+  - **Push-Through Handoff**: Smooth animated Apple pill toggle switch.
+  - **Apple Spring Resistance**: Interactive Cupertino slider tuning spring dampening ($F = -k \cdot \Delta x$) from 15px to 65px displacement.
+  - **Frosted Edge Bubble Demo**: Live preview button that triggers the translucent Apple edge bubble and transition burst shockwave on command.
+* **Subnet Auto-Discovery Radar**:
+  - Real-time animated radar sweep scanning UDP port `54823`.
+  - Discovered peer cards with 1-click **Connect / Disconnect** actions.
+  - Direct IP connection box with keyboard typing and auto-connect.
+* **Live Telemetry & Diagnostics**:
+  - Real-time gauges: **< 0.4 ms** input stream latency, packet rate counters, active control focus states, and timestamped kernel event logs.
+* **System Tray Integration**:
+  - Minimizes smoothly to the Windows taskbar notification tray.
+  - Right-click tray menu for quick edge switching, emergency cursor breakout, and window restore.
 
 ---
+
+## How to Run
+
+Simply double-click `butterflow.exe` on each Windows PC. Butterflow will immediately open the macOS Universal Control dashboard, start broadcasting on your local Wi-Fi or Ethernet network, and auto-pair with nearby peers!
+
+Alternatively, you can customize startup via command line:
 
 ### Command Line Options
 
@@ -55,6 +67,8 @@ butterflow.exe --edge left
 | `--edge <left\|right\|top\|bottom>` | `--edge right` | Specifies which screen edge transitions to the remote PC. Default is `right`. |
 | `--connect <IP>` | `--connect 192.168.1.105` | Directly specifies the remote PC's IP address (bypasses auto-discovery). |
 | `--port <PORT>` | `--port 54823` | Sets custom UDP port (default: `54823`). |
+| `--headless` | `--headless` | Runs engine in headless background mode without opening the GUI. |
+| `--console` | `--console` | Attaches stdout/stderr logging to the launching terminal window. |
 
 ---
 

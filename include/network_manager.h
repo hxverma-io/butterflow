@@ -6,7 +6,19 @@
 #include <windows.h>
 #include <functional>
 #include <string>
+#include <vector>
+#include <mutex>
 #include "protocol.h"
+
+struct DiscoveredPeerInfo {
+    std::string ip;
+    uint16_t port;
+    char deviceName[32];
+    uint16_t screenWidth;
+    uint16_t screenHeight;
+    uint8_t preferredEdge;
+    DWORD lastSeenTick;
+};
 
 class NetworkManager {
 public:
@@ -24,8 +36,11 @@ public:
     void Stop();
 
     void SetPeerAddress(const std::string& ip, uint16_t port = BUTTERFLOW_PORT);
+    void DisconnectPeer();
     bool HasPeer() const { return m_hasPeer; }
     std::string GetPeerIP() const { return m_peerIpStr; }
+    std::string GetPeerDeviceName() const { return m_peerDeviceName; }
+    uint16_t GetPort() const { return m_port; }
 
     // Packet Senders
     void SendDiscoveryBeacon(const DiscoveryPayload& payload);
@@ -39,6 +54,12 @@ public:
     // Poll / Process Incoming Network Events (non-blocking)
     void Poll();
 
+    // Telemetry & Discovery Info
+    uint64_t GetPacketsSent() const { return m_packetsSent; }
+    uint64_t GetPacketsReceived() const { return m_packetsReceived; }
+    std::vector<DiscoveredPeerInfo> GetDiscoveredPeers() const;
+    std::string GetLocalIP() const;
+
     // Handlers
     void SetApproachHandler(ApproachHandler handler) { m_onApproach = handler; }
     void SetTransitionHandler(TransitionHandler handler) { m_onTransition = handler; }
@@ -49,12 +70,19 @@ public:
 
 private:
     SOCKET m_socket;
+    uint16_t m_port;
     sockaddr_in m_localAddr;
     sockaddr_in m_peerAddr;
     sockaddr_in m_broadcastAddr;
     bool m_hasPeer;
     std::string m_peerIpStr;
+    std::string m_peerDeviceName;
     uint32_t m_sequence;
+    uint64_t m_packetsSent;
+    uint64_t m_packetsReceived;
+
+    std::vector<DiscoveredPeerInfo> m_discoveredPeers;
+    mutable std::mutex m_peersMutex;
 
     ApproachHandler m_onApproach;
     TransitionHandler m_onTransition;

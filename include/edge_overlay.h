@@ -13,6 +13,8 @@ public:
     bool Initialize(HINSTANCE hInstance);
     void ShowApproach(ScreenEdge edge, float pushProgress, float normalizedY);
     void PlayTransitionBurst(ScreenEdge edge, float normalizedY);
+    void PlayPreview(ScreenEdge edge);
+    void SetEdge(ScreenEdge edge) { m_currentEdge = edge; }
     void Hide();
 
 private:
