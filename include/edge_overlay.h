@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <gdiplus.h>
+#include <mutex>
 #include "protocol.h"
 
 class EdgeOverlay {
@@ -13,6 +14,8 @@ public:
     bool Initialize(HINSTANCE hInstance);
     void ShowApproach(ScreenEdge edge, float pushProgress, float normalizedY);
     void PlayTransitionBurst(ScreenEdge edge, float normalizedY);
+    void PlayPreview(ScreenEdge edge);
+    void SetEdge(ScreenEdge edge) { m_currentEdge = edge; }
     void Hide();
 
 private:
@@ -31,11 +34,14 @@ private:
     float m_burstRadius;
     int m_screenWidth;
     int m_screenHeight;
+    DWORD m_lastRenderTime;
 
     HDC m_hdcScreen;
     HDC m_hdcMem;
     HBITMAP m_hBitmap;
     HBITMAP m_hOldBitmap;
+
+    std::mutex m_overlayMutex;
 };
 
 #endif // BUTTERFLOW_EDGE_OVERLAY_H

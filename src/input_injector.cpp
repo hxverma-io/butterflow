@@ -1,20 +1,132 @@
 #include "../include/input_injector.h"
+#include "../include/input_capturer.h"
 #include <algorithm>
+#include <cmath>
 
 InputInjector::InputInjector()
     : m_screenWidth(1920),
       m_screenHeight(1080),
       m_entryEdge(EDGE_LEFT),
-      m_isActive(false) {
+      m_isActive(false),
+      m_accumulatedReturnPush(0.0f),
+      m_entryTime(0),
+      m_pendingDx(0),
+      m_pendingDy(0),
+      m_pumpRunning(false) {
 }
 
 InputInjector::~InputInjector() {
+    Stop();
 }
 
 void InputInjector::Initialize(int screenW, int screenH, ScreenEdge entryEdge) {
-    m_screenWidth = screenW;
-    m_screenHeight = screenH;
+    m_screenWidth = screenW > 0 ? screenW : 1920;
+    m_screenHeight = screenH > 0 ? screenH : 1080;
     m_entryEdge = entryEdge;
+    m_accumulatedReturnPush = 0.0f;
+    m_entryTime = 0;
+    m_pendingDx.store(0);
+    m_pendingDy.store(0);
+
+    if (!m_pumpRunning) {
+        m_pumpRunning = true;
+        m_pumpThread = std::thread(&InputInjector::PumpThreadFunc, this);
+    }
+}
+
+void InputInjector::Stop() {
+    if (m_pumpRunning) {
+        m_pumpRunning = false;
+        if (m_pumpThread.joinable()) {
+            m_pumpThread.join();
+        }
+    }
+}
+
+void InputInjector::SetActive(bool active) {
+    m_isActive = active;
+    m_accumulatedReturnPush = 0.0f;
+    m_entryTime = GetTickCount();
+    if (!active) {
+        m_pendingDx.store(0);
+        m_pendingDy.store(0);
+    }
+}
+
+void InputInjector::PumpThreadFunc() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+    double countsPerMs = static_cast<double>(freq.QuadPart) / 1000.0;
+
+    LARGE_INTEGER lastTick;
+    QueryPerformanceCounter(&lastTick);
+
+    while (m_pumpRunning) {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double elapsedMs = (now.QuadPart - lastTick.QuadPart) / countsPerMs;
+
+        if (elapsedMs < 1.0) {
+            if (1.0 - elapsedMs > 1.2) {
+                Sleep(1);
+            } else {
+                std::this_thread::yield();
+            }
+            continue;
+        }
+
+        lastTick = now;
+
+        if (!m_isActive) {
+            continue;
+        }
+
+        int32_t curDx = m_pendingDx.load(std::memory_order_relaxed);
+        int32_t curDy = m_pendingDy.load(std::memory_order_relaxed);
+
+        if (curDx != 0 || curDy != 0) {
+            // macOS Butter-Smooth Liquid Glide Curve:
+            // Eliminates Wi-Fi clump pauses by distributing bursts evenly across frame intervals
+            int32_t stepDx = 0;
+            int32_t absX = std::abs(curDx);
+            if (absX <= 2) {
+                stepDx = curDx; // 100% instant for single/double pixels (0ms latency)
+            } else if (absX <= 6) {
+                stepDx = (curDx > 0) ? (absX + 1) / 2 : -(absX + 1) / 2; // 2-tick interpolation
+            } else if (absX <= 18) {
+                stepDx = (curDx > 0) ? (absX + 2) / 3 : -(absX + 2) / 3; // 3-tick interpolation
+            } else {
+                stepDx = static_cast<int32_t>(curDx * 0.35f); // Fluid 4-tick glide
+                if (stepDx == 0) stepDx = (curDx > 0) ? 1 : -1;
+            }
+
+            int32_t stepDy = 0;
+            int32_t absY = std::abs(curDy);
+            if (absY <= 2) {
+                stepDy = curDy;
+            } else if (absY <= 6) {
+                stepDy = (curDy > 0) ? (absY + 1) / 2 : -(absY + 1) / 2;
+            } else if (absY <= 18) {
+                stepDy = (curDy > 0) ? (absY + 2) / 3 : -(absY + 2) / 3;
+            } else {
+                stepDy = static_cast<int32_t>(curDy * 0.35f);
+                if (stepDy == 0) stepDy = (curDy > 0) ? 1 : -1;
+            }
+
+            m_pendingDx.fetch_sub(stepDx, std::memory_order_relaxed);
+            m_pendingDy.fetch_sub(stepDy, std::memory_order_relaxed);
+
+            INPUT input = {};
+            input.type = INPUT_MOUSE;
+            input.mi.dx = stepDx;
+            input.mi.dy = stepDy;
+            input.mi.dwFlags = MOUSEEVENTF_MOVE;
+            input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
+            SendInput(1, &input, sizeof(INPUT));
+        }
+    }
 }
 
 void InputInjector::SetReturnCallback(ReturnBorderCallback onReturn) {
@@ -24,65 +136,89 @@ void InputInjector::SetReturnCallback(ReturnBorderCallback onReturn) {
 void InputInjector::PlaceCursorAtEdge(ScreenEdge edge, float normY) {
     m_entryEdge = edge;
     m_isActive = true;
+    m_accumulatedReturnPush = 0.0f;
+    m_entryTime = GetTickCount();
+    m_pendingDx.store(0);
+    m_pendingDy.store(0);
 
-    int targetX = 0;
+    int targetX = m_screenWidth / 2;
     int targetY = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenHeight);
 
+    // Place cursor with 25px safe landing margin inside the screen
     if (edge == EDGE_LEFT) {
-        targetX = 5;
+        targetX = 25;
     } else if (edge == EDGE_RIGHT) {
-        targetX = m_screenWidth - 5;
+        targetX = m_screenWidth - 25;
     } else if (edge == EDGE_TOP) {
-        targetX = m_screenWidth / 2;
-        targetY = 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
+        targetY = 25;
     } else if (edge == EDGE_BOTTOM) {
-        targetX = m_screenWidth / 2;
-        targetY = m_screenHeight - 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
+        targetY = m_screenHeight - 25;
     }
 
     SetCursorPos(targetX, targetY);
+    InputCapturer::Instance().SyncCursorPos(targetX, targetY);
 }
 
 void InputInjector::InjectMouse(const MouseInputPayload& payload) {
     if (!m_isActive) return;
 
-    POINT currentPos;
-    GetCursorPos(&currentPos);
+    // 1. Check for return to host when cursor pushes back against the entry edge
+    POINT cur;
+    GetCursorPos(&cur);
 
-    // Check for reverse border crossing back to Host
-    if (m_entryEdge == EDGE_LEFT && payload.dx < 0 && currentPos.x <= 1) {
-        m_isActive = false;
-        if (m_onReturn) {
-            float normY = static_cast<float>(currentPos.y) / static_cast<float>(m_screenHeight);
-            m_onReturn(normY);
+    bool returning = false;
+    DWORD now = GetTickCount();
+    if (now - m_entryTime >= 350) { // 350ms cooldown before return is permitted
+        if (m_entryEdge == EDGE_LEFT && cur.x <= 1 && payload.dx < 0) {
+            returning = true;
+        } else if (m_entryEdge == EDGE_RIGHT && cur.x >= m_screenWidth - 2 && payload.dx > 0) {
+            returning = true;
+        } else if (m_entryEdge == EDGE_TOP && cur.y <= 1 && payload.dy < 0) {
+            returning = true;
+        } else if (m_entryEdge == EDGE_BOTTOM && cur.y >= m_screenHeight - 2 && payload.dy > 0) {
+            returning = true;
         }
-        return;
-    } else if (m_entryEdge == EDGE_RIGHT && payload.dx > 0 && currentPos.x >= m_screenWidth - 2) {
+    }
+
+    if (returning) {
         m_isActive = false;
+        m_pendingDx.store(0);
+        m_pendingDy.store(0);
         if (m_onReturn) {
-            float normY = static_cast<float>(currentPos.y) / static_cast<float>(m_screenHeight);
-            m_onReturn(normY);
+            float normCoord = (m_entryEdge == EDGE_TOP || m_entryEdge == EDGE_BOTTOM)
+                              ? (static_cast<float>(cur.x) / static_cast<float>(m_screenWidth))
+                              : (static_cast<float>(cur.y) / static_cast<float>(m_screenHeight));
+            m_onReturn(normCoord);
         }
         return;
     }
 
-    INPUT input = {};
-    input.type = INPUT_MOUSE;
-
-    // Movement
+    // 2. Feed movement into 0% Jitter Smoothing Pump
     if (payload.flags & MFLAG_MOVE) {
-        input.mi.dx = payload.dx;
-        input.mi.dy = payload.dy;
-        input.mi.dwFlags = MOUSEEVENTF_MOVE;
-        SendInput(1, &input, sizeof(INPUT));
+        // Immediate direction change: flush opposite pending deltas so user flicking never cancels out!
+        int32_t currentPendingX = m_pendingDx.load(std::memory_order_relaxed);
+        int32_t currentPendingY = m_pendingDy.load(std::memory_order_relaxed);
+
+        if ((currentPendingX > 0 && payload.dx < 0) || (currentPendingX < 0 && payload.dx > 0)) {
+            m_pendingDx.store(0, std::memory_order_relaxed);
+        }
+        if ((currentPendingY > 0 && payload.dy < 0) || (currentPendingY < 0 && payload.dy > 0)) {
+            m_pendingDy.store(0, std::memory_order_relaxed);
+        }
+
+        m_pendingDx.fetch_add(payload.dx, std::memory_order_relaxed);
+        m_pendingDy.fetch_add(payload.dy, std::memory_order_relaxed);
     }
 
-    // Button Events
+    // 3. Button Events
     auto SendMouseEvent = [](DWORD dwFlags, DWORD mouseData = 0) {
         INPUT in = {};
         in.type = INPUT_MOUSE;
         in.mi.dwFlags = dwFlags;
         in.mi.mouseData = mouseData;
+        in.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
         SendInput(1, &in, sizeof(INPUT));
     };
 
@@ -121,6 +257,7 @@ void InputInjector::InjectKeyboard(const KeyboardInputPayload& payload) {
     input.ki.wVk = payload.vkCode;
     input.ki.wScan = payload.scanCode;
     input.ki.dwFlags = payload.flags;
+    input.ki.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
 
     SendInput(1, &input, sizeof(INPUT));
 }

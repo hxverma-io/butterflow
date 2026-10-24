@@ -1,6 +1,7 @@
 #include "../include/edge_overlay.h"
 #include <algorithm>
 #include <cmath>
+#include <thread>
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -17,6 +18,7 @@ EdgeOverlay::EdgeOverlay()
       m_burstRadius(0.0f),
       m_screenWidth(0),
       m_screenHeight(0),
+      m_lastRenderTime(0),
       m_hdcScreen(nullptr),
       m_hdcMem(nullptr),
       m_hBitmap(nullptr),
@@ -96,35 +98,72 @@ bool EdgeOverlay::Initialize(HINSTANCE hInstance) {
 }
 
 void EdgeOverlay::ShowApproach(ScreenEdge edge, float pushProgress, float normalizedY) {
-    m_currentEdge = edge;
-    m_pushProgress = std::clamp(pushProgress, 0.0f, 1.0f);
-    m_normalizedY = std::clamp(normalizedY, 0.05f, 0.95f);
-    m_isBursting = false;
+    DWORD now = GetTickCount();
+    {
+        std::lock_guard<std::mutex> lock(m_overlayMutex);
+        m_currentEdge = edge;
+        m_pushProgress = std::clamp(pushProgress, 0.0f, 1.0f);
+        m_normalizedY = std::clamp(normalizedY, 0.05f, 0.95f);
+        m_isBursting = false;
+    }
 
-    if (m_pushProgress > 0.01f) {
-        UpdateLayeredWindowContent();
-    } else {
+    if (m_pushProgress <= 0.01f) {
         Hide();
+        return;
+    }
+
+    // Throttle rendering to at most 60 FPS (16ms) so mouse hooks and network never stutter
+    if (now - m_lastRenderTime >= 16) {
+        m_lastRenderTime = now;
+        std::lock_guard<std::mutex> lock(m_overlayMutex);
+        UpdateLayeredWindowContent();
     }
 }
 
 void EdgeOverlay::PlayTransitionBurst(ScreenEdge edge, float normalizedY) {
-    m_currentEdge = edge;
-    m_normalizedY = normalizedY;
-    m_isBursting = true;
-    m_burstRadius = 10.0f;
+    std::thread([this, edge, normalizedY]() {
+        {
+            std::lock_guard<std::mutex> lock(m_overlayMutex);
+            m_currentEdge = edge;
+            m_normalizedY = normalizedY;
+            m_isBursting = true;
+            m_burstRadius = 10.0f;
+        }
 
-    // Quick burst animation
-    for (int frame = 0; frame < 6; ++frame) {
-        m_burstRadius += 12.0f;
-        m_pushProgress = 1.0f - (frame * 0.18f);
-        UpdateLayeredWindowContent();
-        Sleep(16);
-    }
-    Hide();
+        // Quick asynchronous burst animation
+        for (int frame = 0; frame < 6; ++frame) {
+            {
+                std::lock_guard<std::mutex> lock(m_overlayMutex);
+                m_burstRadius += 12.0f;
+                m_pushProgress = 1.0f - (frame * 0.18f);
+                UpdateLayeredWindowContent();
+            }
+            Sleep(16);
+        }
+        Hide();
+    }).detach();
+}
+
+void EdgeOverlay::PlayPreview(ScreenEdge edge) {
+    std::thread([this, edge]() {
+        for (int i = 1; i <= 16; ++i) {
+            {
+                std::lock_guard<std::mutex> lock(m_overlayMutex);
+                m_currentEdge = edge;
+                m_normalizedY = 0.5f;
+                m_isBursting = false;
+                m_pushProgress = static_cast<float>(i) / 16.0f;
+                UpdateLayeredWindowContent();
+            }
+            Sleep(15);
+        }
+        Sleep(80);
+        PlayTransitionBurst(edge, 0.5f);
+    }).detach();
 }
 
 void EdgeOverlay::Hide() {
+    std::lock_guard<std::mutex> lock(m_overlayMutex);
     m_pushProgress = 0.0f;
     m_isBursting = false;
     
@@ -149,18 +188,24 @@ void EdgeOverlay::Render(HDC hdcMem, int width, int height) {
 
     if (m_pushProgress <= 0.01f && !m_isBursting) return;
 
+    float centerX = m_normalizedY * width;
     float centerY = m_normalizedY * height;
-    float pillHeight = 120.0f + (m_pushProgress * 40.0f);
-    float maxReach = 32.0f * m_pushProgress; // How far the bubble expands inward
-    float pillY = centerY - (pillHeight / 2.0f);
+    float pillLength = 120.0f + (m_pushProgress * 40.0f);
+    float maxReach = 36.0f * m_pushProgress; // How far the bubble expands inward
 
     RectF capsuleRect;
     if (m_currentEdge == EDGE_LEFT) {
-        capsuleRect = RectF(0.0f, pillY, maxReach, pillHeight);
+        float pillY = centerY - (pillLength / 2.0f);
+        capsuleRect = RectF(0.0f, pillY, maxReach, pillLength);
     } else if (m_currentEdge == EDGE_RIGHT) {
-        capsuleRect = RectF(width - maxReach, pillY, maxReach, pillHeight);
-    } else {
-        capsuleRect = RectF(0.0f, pillY, maxReach, pillHeight);
+        float pillY = centerY - (pillLength / 2.0f);
+        capsuleRect = RectF(width - maxReach, pillY, maxReach, pillLength);
+    } else if (m_currentEdge == EDGE_TOP) {
+        float pillX = centerX - (pillLength / 2.0f);
+        capsuleRect = RectF(pillX, 0.0f, pillLength, maxReach);
+    } else { // EDGE_BOTTOM
+        float pillX = centerX - (pillLength / 2.0f);
+        capsuleRect = RectF(pillX, height - maxReach, pillLength, maxReach);
     }
 
     // Outer subtle glow halo
@@ -184,10 +229,18 @@ void EdgeOverlay::Render(HDC hdcMem, int width, int height) {
         pillPath.AddArc(capsuleRect.X + capsuleRect.Width - (radius * 2), capsuleRect.Y, radius * 2, radius * 2, 270, 90);
         pillPath.AddArc(capsuleRect.X + capsuleRect.Width - (radius * 2), capsuleRect.Y + capsuleRect.Height - (radius * 2), radius * 2, radius * 2, 0, 90);
         pillPath.AddLine(capsuleRect.X, capsuleRect.Y + capsuleRect.Height, capsuleRect.X, capsuleRect.Y);
-    } else {
+    } else if (m_currentEdge == EDGE_RIGHT) {
         pillPath.AddArc(capsuleRect.X, capsuleRect.Y, radius * 2, radius * 2, 180, 90);
         pillPath.AddArc(capsuleRect.X, capsuleRect.Y + capsuleRect.Height - (radius * 2), radius * 2, radius * 2, 90, 90);
         pillPath.AddLine(capsuleRect.X + capsuleRect.Width, capsuleRect.Y + capsuleRect.Height, capsuleRect.X + capsuleRect.Width, capsuleRect.Y);
+    } else if (m_currentEdge == EDGE_TOP) {
+        pillPath.AddArc(capsuleRect.X, capsuleRect.Y + capsuleRect.Height - (radius * 2), radius * 2, radius * 2, 90, 90);
+        pillPath.AddArc(capsuleRect.X + capsuleRect.Width - (radius * 2), capsuleRect.Y + capsuleRect.Height - (radius * 2), radius * 2, radius * 2, 0, 90);
+        pillPath.AddLine(capsuleRect.X + capsuleRect.Width, capsuleRect.Y, capsuleRect.X, capsuleRect.Y);
+    } else { // EDGE_BOTTOM
+        pillPath.AddArc(capsuleRect.X, capsuleRect.Y, radius * 2, radius * 2, 180, 90);
+        pillPath.AddArc(capsuleRect.X + capsuleRect.Width - (radius * 2), capsuleRect.Y, radius * 2, radius * 2, 270, 90);
+        pillPath.AddLine(capsuleRect.X + capsuleRect.Width, capsuleRect.Y + capsuleRect.Height, capsuleRect.X, capsuleRect.Y + capsuleRect.Height);
     }
     pillPath.CloseFigure();
 
@@ -209,8 +262,9 @@ void EdgeOverlay::Render(HDC hdcMem, int width, int height) {
     // If bursting, draw dynamic shockwave ripple
     if (m_isBursting) {
         Pen burstPen(Color(static_cast<BYTE>(180 * m_pushProgress), 255, 255, 255), 2.5f);
-        float burstX = (m_currentEdge == EDGE_LEFT) ? 0.0f : width;
-        g.DrawEllipse(&burstPen, burstX - m_burstRadius, centerY - m_burstRadius, m_burstRadius * 2, m_burstRadius * 2);
+        float burstX = (m_currentEdge == EDGE_LEFT) ? 0.0f : (m_currentEdge == EDGE_RIGHT ? width : centerX);
+        float burstY = (m_currentEdge == EDGE_TOP) ? 0.0f : (m_currentEdge == EDGE_BOTTOM ? height : centerY);
+        g.DrawEllipse(&burstPen, burstX - m_burstRadius, burstY - m_burstRadius, m_burstRadius * 2, m_burstRadius * 2);
     }
 }
 
