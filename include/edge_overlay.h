@@ -34,6 +34,7 @@ private:
     float m_burstRadius;
     int m_screenWidth;
     int m_screenHeight;
+    DWORD m_lastRenderTime;
 
     HDC m_hdcScreen;
     HDC m_hdcMem;

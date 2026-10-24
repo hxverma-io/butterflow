@@ -1,5 +1,5 @@
 #include "../include/input_capturer.h"
-#include <vector>
+#include <algorithm>
 
 InputCapturer& InputCapturer::Instance() {
     static InputCapturer instance;
@@ -9,46 +9,28 @@ InputCapturer& InputCapturer::Instance() {
 InputCapturer::InputCapturer()
     : m_hMouseHook(nullptr),
       m_hKeyHook(nullptr),
-      m_hwndSink(nullptr),
       m_physics(nullptr),
       m_lastPos({ 0, 0 }),
-      m_isLocked(false),
-      m_screenW(1920),
-      m_screenH(1080),
-      m_lockedEdge(EDGE_RIGHT) {
+      m_anchorPos({ 960, 540 }),
+      m_isRemoteCapturing(false),
+      m_remoteCurX(960.0f),
+      m_remoteCurY(540.0f),
+      m_remoteWidth(1920),
+      m_remoteHeight(1080),
+      m_screenWidth(1920),
+      m_screenHeight(1080) {
 }
 
 InputCapturer::~InputCapturer() {
     UninstallHooks();
 }
 
-LRESULT CALLBACK InputCapturer::RawInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_INPUT) {
-        InputCapturer::Instance().HandleRawInput(lParam);
-        return 0;
-    }
-    return DefWindowProc(hWnd, msg, wParam, lParam);
-}
-
 bool InputCapturer::InstallHooks(EdgePhysics* physics) {
     m_physics = physics;
+    m_screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    m_screenHeight = GetSystemMetrics(SM_CYSCREEN);
     GetCursorPos(&m_lastPos);
-
-    // Create message window to receive high-precision unconstrained Raw Input
-    WNDCLASSEXA wx = { sizeof(WNDCLASSEXA) };
-    wx.lpfnWndProc = RawInputWndProc;
-    wx.hInstance = GetModuleHandle(nullptr);
-    wx.lpszClassName = "ButterflowRawSink";
-    RegisterClassExA(&wx);
-
-    m_hwndSink = CreateWindowExA(0, "ButterflowRawSink", "RawSink", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, wx.hInstance, nullptr);
-
-    RAWINPUTDEVICE rid = {};
-    rid.usUsagePage = 0x01; // HID_USAGE_PAGE_GENERIC
-    rid.usUsage = 0x02;     // HID_USAGE_GENERIC_MOUSE
-    rid.dwFlags = RIDEV_INPUTSINK;
-    rid.hwndTarget = m_hwndSink;
-    RegisterRawInputDevices(&rid, 1, sizeof(rid));
+    m_anchorPos = { m_screenWidth / 2, m_screenHeight / 2 };
 
     m_hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(nullptr), 0);
     m_hKeyHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(nullptr), 0);
@@ -57,7 +39,7 @@ bool InputCapturer::InstallHooks(EdgePhysics* physics) {
 }
 
 void InputCapturer::UninstallHooks() {
-    UnlockCursor();
+    StopRemoteCapture();
     if (m_hMouseHook) {
         UnhookWindowsHookEx(m_hMouseHook);
         m_hMouseHook = nullptr;
@@ -65,10 +47,6 @@ void InputCapturer::UninstallHooks() {
     if (m_hKeyHook) {
         UnhookWindowsHookEx(m_hKeyHook);
         m_hKeyHook = nullptr;
-    }
-    if (m_hwndSink) {
-        DestroyWindow(m_hwndSink);
-        m_hwndSink = nullptr;
     }
 }
 
@@ -78,58 +56,39 @@ void InputCapturer::SetCallbacks(MouseEventCallback onMouse, KeyEventCallback on
     m_onEscape = onEscape;
 }
 
-void InputCapturer::LockCursorAtEdge(ScreenEdge edge, int screenW, int screenH) {
-    m_isLocked = true;
-    m_screenW = screenW;
-    m_screenH = screenH;
-    m_lockedEdge = edge;
-
-    RECT lockRect;
-    int margin = 4;
-    if (edge == EDGE_RIGHT) {
-        lockRect = { screenW - margin, 0, screenW, screenH };
-    } else if (edge == EDGE_LEFT) {
-        lockRect = { 0, 0, margin, screenH };
-    } else if (edge == EDGE_TOP) {
-        lockRect = { 0, 0, screenW, margin };
-    } else {
-        lockRect = { 0, screenH - margin, screenW, screenH };
-    }
-    ClipCursor(&lockRect);
+void InputCapturer::SetInterventionCallback(InterventionCallback onIntervention) {
+    m_onIntervention = onIntervention;
 }
 
-void InputCapturer::UnlockCursor() {
-    m_isLocked = false;
-    ClipCursor(nullptr);
+void InputCapturer::StartRemoteCapture(ScreenEdge targetEdge, float normY, int remoteW, int remoteH) {
+    m_isRemoteCapturing = true;
+    m_remoteWidth = remoteW > 0 ? remoteW : 1920;
+    m_remoteHeight = remoteH > 0 ? remoteH : 1080;
+
+    // Initialize remote cursor position on entry side
+    if (targetEdge == EDGE_LEFT) {
+        m_remoteCurX = 40.0f; // Safe 40px entry margin inside remote display
+        m_remoteCurY = std::clamp(normY, 0.05f, 0.95f) * m_remoteHeight;
+    } else if (targetEdge == EDGE_RIGHT) {
+        m_remoteCurX = m_remoteWidth - 40.0f;
+        m_remoteCurY = std::clamp(normY, 0.05f, 0.95f) * m_remoteHeight;
+    } else if (targetEdge == EDGE_TOP) {
+        m_remoteCurX = std::clamp(normY, 0.05f, 0.95f) * m_remoteWidth;
+        m_remoteCurY = 40.0f;
+    } else { // EDGE_BOTTOM
+        m_remoteCurX = std::clamp(normY, 0.05f, 0.95f) * m_remoteWidth;
+        m_remoteCurY = m_remoteHeight - 40.0f;
+    }
+
+    // Set anchor position to screen center
+    m_anchorPos = { m_screenWidth / 2, m_screenHeight / 2 };
+    SetCursorPos(m_anchorPos.x, m_anchorPos.y);
+    m_lastPos = m_anchorPos;
+}
+
+void InputCapturer::StopRemoteCapture() {
+    m_isRemoteCapturing = false;
     GetCursorPos(&m_lastPos);
-}
-
-void InputCapturer::HandleRawInput(LPARAM lParam) {
-    if (!m_physics || m_physics->GetState() != ControlState::REMOTE_ACTIVE) {
-        return;
-    }
-
-    UINT dwSize = 0;
-    GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, nullptr, &dwSize, sizeof(RAWINPUTHEADER));
-    if (dwSize == 0) return;
-
-    std::vector<BYTE> lpb(dwSize);
-    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, lpb.data(), &dwSize, sizeof(RAWINPUTHEADER)) != dwSize) {
-        return;
-    }
-
-    RAWINPUT* raw = reinterpret_cast<RAWINPUT*>(lpb.data());
-    if (raw->header.dwType == RIM_TYPEMOUSE) {
-        int dx = raw->data.mouse.lLastX;
-        int dy = raw->data.mouse.lLastY;
-        if ((dx != 0 || dy != 0) && m_onMouse) {
-            MouseInputPayload payload = {};
-            payload.flags = MFLAG_MOVE;
-            payload.dx = dx;
-            payload.dy = dy;
-            m_onMouse(payload);
-        }
-    }
 }
 
 LRESULT CALLBACK InputCapturer::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -149,21 +108,65 @@ LRESULT CALLBACK InputCapturer::LowLevelKeyboardProc(int nCode, WPARAM wParam, L
 LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) {
     MSLLHOOKSTRUCT* pMouse = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-    // CRITICAL FIX: Ignore any synthetic inputs injected by Butterflow or external software!
+    // CRITICAL: Ignore any synthetic inputs injected by Butterflow or software
     if ((pMouse->flags & LLMHF_INJECTED) || (pMouse->dwExtraInfo == BUTTERFLOW_EXTRA_INFO_MAGIC)) {
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
 
-    bool isRemote = (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
+    // 1. Companion Receiver Check: If local user touches physical mouse on Companion PC, yield remote control!
+    if (m_physics && m_physics->IsCompanionReceiving()) {
+        if (wParam == WM_MOUSEMOVE || wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            if (m_onIntervention) {
+                m_onIntervention();
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    // 2. Remote Host Mode: User is controlling the Companion PC
+    bool isRemote = m_isRemoteCapturing || (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
 
     if (isRemote) {
-        // While controlling remote PC, suppress local mouse movement on host desktop
         if (wParam == WM_MOUSEMOVE) {
-            return 1;
+            int dx = pMouse->pt.x - m_anchorPos.x;
+            int dy = pMouse->pt.y - m_anchorPos.y;
+
+            if (dx != 0 || dy != 0) {
+                m_remoteCurX = std::clamp(m_remoteCurX + dx, 0.0f, static_cast<float>(m_remoteWidth));
+                m_remoteCurY = std::clamp(m_remoteCurY + dy, 0.0f, static_cast<float>(m_remoteHeight));
+
+                uint16_t normX = static_cast<uint16_t>((m_remoteCurX / m_remoteWidth) * 65535.0f);
+                uint16_t normY = static_cast<uint16_t>((m_remoteCurY / m_remoteHeight) * 65535.0f);
+
+                if (m_onMouse) {
+                    MouseInputPayload payload = {};
+                    payload.flags = MFLAG_MOVE;
+                    payload.dx = dx;
+                    payload.dy = dy;
+                    payload.normX = normX;
+                    payload.normY = normY;
+                    m_onMouse(payload);
+                }
+
+                // Re-anchor cursor at center with BUTTERFLOW_EXTRA_INFO_MAGIC tag so hook ignores it
+                INPUT in = {};
+                in.type = INPUT_MOUSE;
+                in.mi.dx = (m_anchorPos.x * 65536) / m_screenWidth;
+                in.mi.dy = (m_anchorPos.y * 65536) / m_screenHeight;
+                in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+                in.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
+                SendInput(1, &in, sizeof(INPUT));
+            }
+            return 1; // Suppress local cursor
         }
 
         // Capture button and wheel actions
         MouseInputPayload payload = {};
+        uint16_t normX = static_cast<uint16_t>((m_remoteCurX / m_remoteWidth) * 65535.0f);
+        uint16_t normY = static_cast<uint16_t>((m_remoteCurY / m_remoteHeight) * 65535.0f);
+        payload.normX = normX;
+        payload.normY = normY;
+
         switch (wParam) {
             case WM_LBUTTONDOWN: payload.flags = MFLAG_LEFT_DOWN; break;
             case WM_LBUTTONUP:   payload.flags = MFLAG_LEFT_UP;   break;
@@ -193,10 +196,10 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
             m_onMouse(payload);
         }
 
-        return 1; // Suppress local clicks while controlling remote PC!
+        return 1; // Suppress clicks locally while remote is active
     }
 
-    // Local mode: track mouse coordinates & process boundary physics
+    // 3. Local Mode: Track mouse coordinates & process boundary physics
     int dx = pMouse->pt.x - m_lastPos.x;
     int dy = pMouse->pt.y - m_lastPos.y;
     m_lastPos = pMouse->pt;
@@ -204,7 +207,7 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
     if (wParam == WM_MOUSEMOVE && m_physics) {
         bool suppress = m_physics->ProcessLocalMouseMove(pMouse->pt.x, pMouse->pt.y, dx, dy);
         if (suppress) {
-            return 1; // Handed off to remote screen
+            return 1;
         }
     }
 
@@ -214,7 +217,7 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
 LRESULT InputCapturer::HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     KBDLLHOOKSTRUCT* pKey = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-    // CRITICAL FIX: Ignore synthetic keyboard inputs!
+    // CRITICAL: Ignore synthetic keyboard inputs!
     if ((pKey->flags & LLKHF_INJECTED) || (pKey->dwExtraInfo == BUTTERFLOW_EXTRA_INFO_MAGIC)) {
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
@@ -231,7 +234,17 @@ LRESULT InputCapturer::HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lPara
         return 1;
     }
 
-    bool isRemote = (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
+    // If Companion PC receiving: physical keystroke yields remote control to local user
+    if (m_physics && m_physics->IsCompanionReceiving()) {
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            if (m_onIntervention) {
+                m_onIntervention();
+            }
+        }
+        return CallNextHookEx(nullptr, nCode, wParam, lParam);
+    }
+
+    bool isRemote = m_isRemoteCapturing || (m_physics && m_physics->GetState() == ControlState::REMOTE_ACTIVE);
     if (isRemote) {
         if (m_onKey) {
             KeyboardInputPayload payload = {};

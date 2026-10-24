@@ -1,20 +1,23 @@
 #include "../include/input_injector.h"
 #include <algorithm>
+#include <cmath>
 
 InputInjector::InputInjector()
     : m_screenWidth(1920),
       m_screenHeight(1080),
       m_entryEdge(EDGE_LEFT),
-      m_isActive(false) {
+      m_isActive(false),
+      m_accumulatedReturnPush(0.0f) {
 }
 
 InputInjector::~InputInjector() {
 }
 
 void InputInjector::Initialize(int screenW, int screenH, ScreenEdge entryEdge) {
-    m_screenWidth = screenW;
-    m_screenHeight = screenH;
+    m_screenWidth = screenW > 0 ? screenW : 1920;
+    m_screenHeight = screenH > 0 ? screenH : 1080;
     m_entryEdge = entryEdge;
+    m_accumulatedReturnPush = 0.0f;
 }
 
 void InputInjector::SetReturnCallback(ReturnBorderCallback onReturn) {
@@ -24,20 +27,22 @@ void InputInjector::SetReturnCallback(ReturnBorderCallback onReturn) {
 void InputInjector::PlaceCursorAtEdge(ScreenEdge edge, float normY) {
     m_entryEdge = edge;
     m_isActive = true;
+    m_accumulatedReturnPush = 0.0f;
 
-    int targetX = 0;
+    int targetX = m_screenWidth / 2;
     int targetY = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenHeight);
 
+    // Place cursor with a comfortable 40px margin inside the screen
     if (edge == EDGE_LEFT) {
-        targetX = 10;
+        targetX = 40;
     } else if (edge == EDGE_RIGHT) {
-        targetX = m_screenWidth - 10;
+        targetX = m_screenWidth - 40;
     } else if (edge == EDGE_TOP) {
         targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
-        targetY = 10;
+        targetY = 40;
     } else if (edge == EDGE_BOTTOM) {
         targetX = static_cast<int>(std::clamp(normY, 0.05f, 0.95f) * m_screenWidth);
-        targetY = m_screenHeight - 10;
+        targetY = m_screenHeight - 40;
     }
 
     SetCursorPos(targetX, targetY);
@@ -46,53 +51,62 @@ void InputInjector::PlaceCursorAtEdge(ScreenEdge edge, float normY) {
 void InputInjector::InjectMouse(const MouseInputPayload& payload) {
     if (!m_isActive) return;
 
-    POINT currentPos;
-    GetCursorPos(&currentPos);
+    // 1. Check for deliberate return push against the entry edge
+    bool atReturnBorder = false;
+    float returnPush = 0.0f;
 
-    // Check for reverse border crossing back to Host PC
-    if (m_entryEdge == EDGE_LEFT && payload.dx < 0 && currentPos.x <= 1) {
-        m_isActive = false;
-        if (m_onReturn) {
-            float normY = static_cast<float>(currentPos.y) / static_cast<float>(m_screenHeight);
-            m_onReturn(normY);
+    if (m_entryEdge == EDGE_LEFT) {
+        if (payload.normX <= 150 && payload.dx < 0) {
+            atReturnBorder = true;
+            returnPush = static_cast<float>(-payload.dx);
         }
-        return;
-    } else if (m_entryEdge == EDGE_RIGHT && payload.dx > 0 && currentPos.x >= m_screenWidth - 2) {
-        m_isActive = false;
-        if (m_onReturn) {
-            float normY = static_cast<float>(currentPos.y) / static_cast<float>(m_screenHeight);
-            m_onReturn(normY);
+    } else if (m_entryEdge == EDGE_RIGHT) {
+        if (payload.normX >= 65385 && payload.dx > 0) {
+            atReturnBorder = true;
+            returnPush = static_cast<float>(payload.dx);
         }
-        return;
-    } else if (m_entryEdge == EDGE_TOP && payload.dy < 0 && currentPos.y <= 1) {
-        m_isActive = false;
-        if (m_onReturn) {
-            float normX = static_cast<float>(currentPos.x) / static_cast<float>(m_screenWidth);
-            m_onReturn(normX);
+    } else if (m_entryEdge == EDGE_TOP) {
+        if (payload.normY <= 150 && payload.dy < 0) {
+            atReturnBorder = true;
+            returnPush = static_cast<float>(-payload.dy);
         }
-        return;
-    } else if (m_entryEdge == EDGE_BOTTOM && payload.dy > 0 && currentPos.y >= m_screenHeight - 2) {
-        m_isActive = false;
-        if (m_onReturn) {
-            float normX = static_cast<float>(currentPos.x) / static_cast<float>(m_screenWidth);
-            m_onReturn(normX);
+    } else if (m_entryEdge == EDGE_BOTTOM) {
+        if (payload.normY >= 65385 && payload.dy > 0) {
+            atReturnBorder = true;
+            returnPush = static_cast<float>(payload.dy);
         }
-        return;
     }
 
-    INPUT input = {};
-    input.type = INPUT_MOUSE;
+    if (atReturnBorder) {
+        m_accumulatedReturnPush += std::max(returnPush, 1.0f);
+        // Require 20px deliberate push to return back to Host PC
+        if (m_accumulatedReturnPush >= 20.0f) {
+            m_isActive = false;
+            m_accumulatedReturnPush = 0.0f;
+            if (m_onReturn) {
+                float normCoord = (m_entryEdge == EDGE_TOP || m_entryEdge == EDGE_BOTTOM) 
+                                  ? (static_cast<float>(payload.normX) / 65535.0f) 
+                                  : (static_cast<float>(payload.normY) / 65535.0f);
+                m_onReturn(normCoord);
+            }
+            return;
+        }
+    } else {
+        m_accumulatedReturnPush = 0.0f;
+    }
 
-    // Relative mouse movement
+    // 2. High-precision Absolute Cursor Positioning (Zero Jitter, Zero Drift)
     if (payload.flags & MFLAG_MOVE) {
-        input.mi.dx = payload.dx;
-        input.mi.dy = payload.dy;
-        input.mi.dwFlags = MOUSEEVENTF_MOVE;
+        INPUT input = {};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = (static_cast<DWORD>(payload.normX) * 65536) / 65535;
+        input.mi.dy = (static_cast<DWORD>(payload.normY) * 65536) / 65535;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
         input.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
         SendInput(1, &input, sizeof(INPUT));
     }
 
-    // Button Events
+    // 3. Button Events
     auto SendMouseEvent = [](DWORD dwFlags, DWORD mouseData = 0) {
         INPUT in = {};
         in.type = INPUT_MOUSE;

@@ -11,6 +11,7 @@ public:
     using MouseEventCallback = std::function<void(const MouseInputPayload& payload)>;
     using KeyEventCallback = std::function<void(const KeyboardInputPayload& payload)>;
     using EscapeCallback = std::function<void()>;
+    using InterventionCallback = std::function<void()>;
 
     static InputCapturer& Instance();
 
@@ -18,14 +19,14 @@ public:
     void UninstallHooks();
 
     void SetCallbacks(MouseEventCallback onMouse, KeyEventCallback onKey, EscapeCallback onEscape);
+    void SetInterventionCallback(InterventionCallback onIntervention);
 
-    void LockCursorAtEdge(ScreenEdge edge, int screenW, int screenH);
-    void UnlockCursor();
+    void StartRemoteCapture(ScreenEdge targetEdge, float normY, int remoteW = 1920, int remoteH = 1080);
+    void StopRemoteCapture();
 
-    // Internal hook and Raw Input callbacks
+    // Internal hook callbacks
     LRESULT HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam);
     LRESULT HandleKeyboardHook(int nCode, WPARAM wParam, LPARAM lParam);
-    void HandleRawInput(LPARAM lParam);
 
 private:
     InputCapturer();
@@ -33,22 +34,26 @@ private:
 
     HHOOK m_hMouseHook;
     HHOOK m_hKeyHook;
-    HWND m_hwndSink;
     EdgePhysics* m_physics;
 
     POINT m_lastPos;
-    bool m_isLocked;
-    int m_screenW;
-    int m_screenH;
-    ScreenEdge m_lockedEdge;
+    POINT m_anchorPos;
+    bool m_isRemoteCapturing;
+
+    float m_remoteCurX;
+    float m_remoteCurY;
+    int m_remoteWidth;
+    int m_remoteHeight;
+    int m_screenWidth;
+    int m_screenHeight;
 
     MouseEventCallback m_onMouse;
     KeyEventCallback m_onKey;
     EscapeCallback m_onEscape;
+    InterventionCallback m_onIntervention;
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK RawInputWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 };
 
 #endif // BUTTERFLOW_INPUT_CAPTURER_H

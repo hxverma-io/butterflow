@@ -19,7 +19,7 @@ public:
     void InjectKeyboard(const KeyboardInputPayload& payload);
     void PlaceCursorAtEdge(ScreenEdge edge, float normY);
 
-    void SetActive(bool active) { m_isActive = active; }
+    void SetActive(bool active) { m_isActive = active; m_accumulatedReturnPush = 0.0f; }
     bool IsActive() const { return m_isActive; }
     void SetEntryEdge(ScreenEdge entryEdge) { m_entryEdge = entryEdge; }
     ScreenEdge GetEntryEdge() const { return m_entryEdge; }
@@ -29,6 +29,7 @@ private:
     int m_screenHeight;
     ScreenEdge m_entryEdge;
     bool m_isActive;
+    float m_accumulatedReturnPush;
     ReturnBorderCallback m_onReturn;
 };
 

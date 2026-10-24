@@ -117,23 +117,36 @@ int main(int argc, char* argv[]) {
         std::cout << "[+] Discovered nearby Windows peer: " << disc.deviceName 
                   << " (" << peerIp << ") Screen: " << disc.screenWidth << "x" << disc.screenHeight << "\n";
         ui.Log("DISCOVERY", "Discovered nearby peer: " + std::string(disc.deviceName) + " (" + peerIp + ")", Gdiplus::Color(255, 48, 209, 88));
+
+        // Invert edge reciprocal automatically if both are set to identical defaults
+        ScreenEdge peerEdge = static_cast<ScreenEdge>(disc.preferredEdge);
+        ScreenEdge reciprocalEdge = (peerEdge == EDGE_RIGHT) ? EDGE_LEFT : (peerEdge == EDGE_LEFT ? EDGE_RIGHT : (peerEdge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
+        if (ui.GetConfiguredEdge() == peerEdge) {
+            ui.SetConfiguredEdge(reciprocalEdge);
+            physics.SetRemoteEdge(reciprocalEdge);
+            ui.Log("ARRANGEMENT", "Auto-aligned reciprocal edge to opposite side of peer.", Gdiplus::Color(255, 10, 132, 255));
+        }
     });
 
     net.SetApproachHandler([&](const EdgeApproachPayload& approach) {
-        // Display the Apple-style incoming bubble on our screen edge
+        // Display Apple-style incoming bubble on our screen edge
         overlay.ShowApproach(static_cast<ScreenEdge>(approach.edge), approach.pushProgress, approach.normalizedY);
     });
 
     net.SetTransitionHandler([&](const CursorTransitionPayload& trans) {
+        // We are receiving remote cursor: enter COMPANION_RECEIVING mode (disable local physics)
+        physics.SetCompanionReceiving(true);
         overlay.PlayTransitionBurst(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
         injector.PlaceCursorAtEdge(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
-        ui.Log("STREAM", "Remote cursor entered local screen display.", Gdiplus::Color(255, 175, 82, 222));
+        ui.Log("STREAM", "Remote cursor entered local screen display (Companion mode active).", Gdiplus::Color(255, 175, 82, 222));
     });
 
     net.SetLeaveHandler([&](float normY) {
+        // Remote cursor returned back to Host PC
+        InputCapturer::Instance().StopRemoteCapture();
         physics.OnRemoteCursorReturned(normY);
-        InputCapturer::Instance().UnlockCursor();
-        ui.Log("STREAM", "Remote cursor left back to host PC.", Gdiplus::Color(255, 10, 132, 255));
+        overlay.Hide();
+        ui.Log("STREAM", "Remote cursor returned to host PC.", Gdiplus::Color(255, 10, 132, 255));
     });
 
     net.SetMouseHandler([&](const MouseInputPayload& mouse) {
@@ -154,30 +167,31 @@ int main(int argc, char* argv[]) {
             }
         },
         [&](ScreenEdge edge, float normY) {
-            // Local cursor broke through barrier: lock cursor and notify peer
+            // Local cursor broke through barrier: transition to remote companion PC
             std::cout << "[*] Cursor crossed boundary onto remote PC.\n";
             ui.Log("HANDOFF", "Pointer crossed boundary onto remote PC screen.", Gdiplus::Color(255, 0, 180, 255));
-            InputCapturer::Instance().LockCursorAtEdge(edge, screenW, screenH);
+            ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : (edge == EDGE_LEFT ? EDGE_RIGHT : (edge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
+            InputCapturer::Instance().StartRemoteCapture(targetEdge, normY, screenW, screenH);
             if (net.HasPeer()) {
-                ScreenEdge targetEdge = (edge == EDGE_RIGHT) ? EDGE_LEFT : (edge == EDGE_LEFT ? EDGE_RIGHT : (edge == EDGE_TOP ? EDGE_BOTTOM : EDGE_TOP));
                 net.SendCursorEnter(targetEdge, 0.0f, normY);
             }
         },
         [&](ScreenEdge edge, float normY) {
             std::cout << "[*] Cursor returned to local PC.\n";
             ui.Log("HANDOFF", "Pointer returned to local PC.", Gdiplus::Color(255, 48, 209, 88));
-            InputCapturer::Instance().UnlockCursor();
+            InputCapturer::Instance().StopRemoteCapture();
             overlay.Hide();
         }
     );
 
-    // Setup Return crossing callback from Injector
+    // Setup Return crossing callback from Injector (when cursor returns from Companion to Host)
     injector.SetReturnCallback([&](float normY) {
         std::cout << "[*] Remote cursor leaving back to host.\n";
+        physics.SetCompanionReceiving(false);
         net.SendCursorLeave(normY);
     });
 
-    // 6. Install Low-Level Input Hooks & Raw Input Sink
+    // 6. Install Low-Level Input Hooks
     if (!InputCapturer::Instance().InstallHooks(&physics)) {
         std::cerr << "[-] Failed to install Windows low-level input hooks.\n";
         ui.Log("ERROR", "Failed to install Windows low-level input hooks.", Gdiplus::Color(255, 255, 69, 58));
@@ -196,10 +210,23 @@ int main(int argc, char* argv[]) {
             std::cout << "[!] Emergency Breakout triggered. Resetting control to local PC.\n";
             ui.Log("SAFETY", "Emergency Breakout triggered: cursor released to local PC.", Gdiplus::Color(255, 255, 69, 58));
             physics.ResetToLocal();
-            InputCapturer::Instance().UnlockCursor();
+            InputCapturer::Instance().StopRemoteCapture();
+            injector.SetActive(false);
             overlay.Hide();
+            net.SendCursorLeave(0.5f);
         }
     );
+
+    // Local physical user intervention protection on Companion PC
+    InputCapturer::Instance().SetInterventionCallback([&]() {
+        if (physics.IsCompanionReceiving()) {
+            std::cout << "[*] Local user intervened on companion PC. Releasing remote control.\n";
+            ui.Log("LOCAL", "Physical input detected on companion PC: released remote control.", Gdiplus::Color(255, 255, 159, 10));
+            physics.SetCompanionReceiving(false);
+            injector.SetActive(false);
+            net.SendCursorLeave(0.5f);
+        }
+    });
 
     std::cout << "[+] Butterflow macOS Universal Control engine active and running.\n";
 
@@ -249,11 +276,10 @@ int main(int argc, char* argv[]) {
 
             // Liveness check: If companion PC timed out for >5 seconds, disconnect cleanly
             if (now - net.GetLastPeerActivity() > 5000) {
-                if (physics.GetState() == ControlState::REMOTE_ACTIVE) {
-                    physics.ResetToLocal();
-                    InputCapturer::Instance().UnlockCursor();
-                    overlay.Hide();
-                }
+                physics.ResetToLocal();
+                InputCapturer::Instance().StopRemoteCapture();
+                injector.SetActive(false);
+                overlay.Hide();
                 net.DisconnectPeer();
                 ui.Log("TIMEOUT", "Companion PC connection timed out. Resuming auto-discovery radar...", Gdiplus::Color(255, 255, 69, 58));
             }

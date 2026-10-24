@@ -8,8 +8,9 @@ EdgePhysics::EdgePhysics()
       m_screenHeight(1080),
       m_state(ControlState::LOCAL_ACTIVE),
       m_accumulatedPush(0.0f),
-      m_pushThreshold(35.0f), // 35 pixels of deliberate continuous displacement
+      m_pushThreshold(35.0f), // 35 pixels of deliberate displacement
       m_lastPushTime(0),
+      m_lastTransitionTime(0),
       m_pushThroughEnabled(true) {
 }
 
@@ -27,13 +28,34 @@ void EdgePhysics::SetCallbacks(ApproachCallback onApproach, TransitionCallback o
     m_onReturn = onReturn;
 }
 
+void EdgePhysics::SetCompanionReceiving(bool receiving) {
+    if (receiving) {
+        m_state = ControlState::COMPANION_RECEIVING;
+        m_accumulatedPush = 0.0f;
+    } else if (m_state == ControlState::COMPANION_RECEIVING) {
+        m_state = ControlState::LOCAL_ACTIVE;
+        m_accumulatedPush = 0.0f;
+    }
+}
+
 bool EdgePhysics::ProcessLocalMouseMove(int x, int y, int dx, int dy) {
+    // If controlling the remote PC, local mouse movement is suppressed
     if (m_state == ControlState::REMOTE_ACTIVE) {
-        // Entirely suppressed locally; transmitted to remote peer
         return true;
     }
 
+    // If this PC is receiving remote cursor from another machine, edge physics is completely disabled!
+    if (m_state == ControlState::COMPANION_RECEIVING) {
+        return false;
+    }
+
     if (!m_pushThroughEnabled) {
+        return false;
+    }
+
+    // Prevent immediate bounce-back within 600ms of any transition
+    DWORD now = GetTickCount();
+    if (now - m_lastTransitionTime < 600) {
         return false;
     }
 
@@ -42,34 +64,34 @@ bool EdgePhysics::ProcessLocalMouseMove(int x, int y, int dx, int dy) {
 
     switch (m_remoteEdge) {
         case EDGE_RIGHT:
-            if (x >= m_screenWidth - 2) {
+            if (x >= m_screenWidth - 3 && dx > 0) {
                 atBorder = true;
-                pushDelta = static_cast<float>(dx > 0 ? dx : 1);
+                pushDelta = static_cast<float>(dx);
             }
             break;
         case EDGE_LEFT:
-            if (x <= 1) {
+            if (x <= 2 && dx < 0) {
                 atBorder = true;
-                pushDelta = static_cast<float>(dx < 0 ? -dx : 1);
+                pushDelta = static_cast<float>(-dx);
             }
             break;
         case EDGE_TOP:
-            if (y <= 1) {
+            if (y <= 2 && dy < 0) {
                 atBorder = true;
-                pushDelta = static_cast<float>(dy < 0 ? -dy : 1);
+                pushDelta = static_cast<float>(-dy);
             }
             break;
         case EDGE_BOTTOM:
-            if (y >= m_screenHeight - 2) {
+            if (y >= m_screenHeight - 3 && dy > 0) {
                 atBorder = true;
-                pushDelta = static_cast<float>(dy > 0 ? dy : 1);
+                pushDelta = static_cast<float>(dy);
             }
             break;
     }
 
     if (atBorder) {
         m_state = ControlState::PUSHING_BORDER;
-        m_lastPushTime = GetTickCount();
+        m_lastPushTime = now;
         m_accumulatedPush += std::max(pushDelta, 1.0f);
 
         float progress = std::clamp(m_accumulatedPush / m_pushThreshold, 0.0f, 1.0f);
@@ -79,19 +101,21 @@ bool EdgePhysics::ProcessLocalMouseMove(int x, int y, int dx, int dy) {
             m_onApproach(m_remoteEdge, progress, normY);
         }
 
-        // Check if barrier is broken through
+        // Barrier broken through! Transition to remote companion PC
         if (progress >= 1.0f) {
             m_state = ControlState::REMOTE_ACTIVE;
             m_accumulatedPush = 0.0f;
+            m_lastTransitionTime = now;
+
             if (m_onTransition) {
                 m_onTransition(m_remoteEdge, normY);
             }
-            return true; // Suppress local cursor
+            return true;
         }
 
         return false;
     } else {
-        // If cursor moved away from the edge, decay or reset
+        // Cursor moved away from the edge: reset push accumulation
         if (m_state == ControlState::PUSHING_BORDER) {
             m_accumulatedPush = 0.0f;
             m_state = ControlState::LOCAL_ACTIVE;
@@ -107,7 +131,7 @@ void EdgePhysics::DecayTick() {
     if (m_state == ControlState::PUSHING_BORDER) {
         DWORD now = GetTickCount();
         if (now - m_lastPushTime > 80) { // Inactive for >80ms
-            m_accumulatedPush = std::max(0.0f, m_accumulatedPush - 3.5f);
+            m_accumulatedPush = std::max(0.0f, m_accumulatedPush - 4.0f);
             float progress = m_accumulatedPush / m_pushThreshold;
             
             if (m_onApproach) {
@@ -124,22 +148,24 @@ void EdgePhysics::DecayTick() {
 void EdgePhysics::OnRemoteCursorReturned(float normY) {
     m_state = ControlState::LOCAL_ACTIVE;
     m_accumulatedPush = 0.0f;
+    m_lastTransitionTime = GetTickCount();
 
-    // Reposition local cursor at the matching edge
+    // Place local cursor safely INSIDE the screen (50px margin) so it never bounces back into remote
     int targetX = m_screenWidth / 2;
-    int targetY = static_cast<int>(normY * m_screenHeight);
+    int targetY = static_cast<int>(std::clamp(normY, 0.08f, 0.92f) * m_screenHeight);
 
     if (m_remoteEdge == EDGE_RIGHT) {
-        targetX = m_screenWidth - 5;
+        targetX = m_screenWidth - 50;
     } else if (m_remoteEdge == EDGE_LEFT) {
-        targetX = 5;
+        targetX = 50;
     } else if (m_remoteEdge == EDGE_TOP) {
-        targetX = static_cast<int>(normY * m_screenWidth);
-        targetY = 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.08f, 0.92f) * m_screenWidth);
+        targetY = 50;
     } else if (m_remoteEdge == EDGE_BOTTOM) {
-        targetX = static_cast<int>(normY * m_screenWidth);
-        targetY = m_screenHeight - 5;
+        targetX = static_cast<int>(std::clamp(normY, 0.08f, 0.92f) * m_screenWidth);
+        targetY = m_screenHeight - 50;
     }
+
     SetCursorPos(targetX, targetY);
 
     if (m_onReturn) {
@@ -150,5 +176,6 @@ void EdgePhysics::OnRemoteCursorReturned(float normY) {
 void EdgePhysics::ResetToLocal() {
     m_state = ControlState::LOCAL_ACTIVE;
     m_accumulatedPush = 0.0f;
+    m_lastTransitionTime = GetTickCount();
     ClipCursor(nullptr);
 }

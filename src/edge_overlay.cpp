@@ -1,6 +1,7 @@
 #include "../include/edge_overlay.h"
 #include <algorithm>
 #include <cmath>
+#include <thread>
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -17,6 +18,7 @@ EdgeOverlay::EdgeOverlay()
       m_burstRadius(0.0f),
       m_screenWidth(0),
       m_screenHeight(0),
+      m_lastRenderTime(0),
       m_hdcScreen(nullptr),
       m_hdcMem(nullptr),
       m_hBitmap(nullptr),
@@ -95,19 +97,26 @@ bool EdgeOverlay::Initialize(HINSTANCE hInstance) {
     return true;
 }
 
-#include <thread>
-
 void EdgeOverlay::ShowApproach(ScreenEdge edge, float pushProgress, float normalizedY) {
-    std::lock_guard<std::mutex> lock(m_overlayMutex);
-    m_currentEdge = edge;
-    m_pushProgress = std::clamp(pushProgress, 0.0f, 1.0f);
-    m_normalizedY = std::clamp(normalizedY, 0.05f, 0.95f);
-    m_isBursting = false;
+    DWORD now = GetTickCount();
+    {
+        std::lock_guard<std::mutex> lock(m_overlayMutex);
+        m_currentEdge = edge;
+        m_pushProgress = std::clamp(pushProgress, 0.0f, 1.0f);
+        m_normalizedY = std::clamp(normalizedY, 0.05f, 0.95f);
+        m_isBursting = false;
+    }
 
-    if (m_pushProgress > 0.01f) {
-        UpdateLayeredWindowContent();
-    } else {
+    if (m_pushProgress <= 0.01f) {
         Hide();
+        return;
+    }
+
+    // Throttle rendering to at most 60 FPS (16ms) so mouse hooks and network never stutter
+    if (now - m_lastRenderTime >= 16) {
+        m_lastRenderTime = now;
+        std::lock_guard<std::mutex> lock(m_overlayMutex);
+        UpdateLayeredWindowContent();
     }
 }
 
