@@ -19,7 +19,7 @@ public:
     void InjectKeyboard(const KeyboardInputPayload& payload);
     void PlaceCursorAtEdge(ScreenEdge edge, float normY);
 
-    void SetActive(bool active) { m_isActive = active; m_accumulatedReturnPush = 0.0f; }
+    void SetActive(bool active) { m_isActive = active; m_accumulatedReturnPush = 0.0f; m_entryTime = GetTickCount(); }
     bool IsActive() const { return m_isActive; }
     void SetEntryEdge(ScreenEdge entryEdge) { m_entryEdge = entryEdge; }
     ScreenEdge GetEntryEdge() const { return m_entryEdge; }
@@ -30,6 +30,7 @@ private:
     ScreenEdge m_entryEdge;
     bool m_isActive;
     float m_accumulatedReturnPush;
+    DWORD m_entryTime;
     ReturnBorderCallback m_onReturn;
 };
 

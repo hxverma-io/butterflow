@@ -58,6 +58,7 @@ private:
     KeyEventCallback m_onKey;
     EscapeCallback m_onEscape;
     InterventionCallback m_onIntervention;
+    int m_companionPhysicalDelta;
 
     static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);

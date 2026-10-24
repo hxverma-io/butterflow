@@ -21,7 +21,8 @@ InputCapturer::InputCapturer()
       m_remoteHeight(1080),
       m_screenWidth(1920),
       m_screenHeight(1080),
-      m_lastMoveTime(std::chrono::steady_clock::now()) {
+      m_lastMoveTime(std::chrono::steady_clock::now()),
+      m_companionPhysicalDelta(0) {
 }
 
 InputCapturer::~InputCapturer() {
@@ -152,11 +153,22 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
     }
 
-    // 1. Companion Receiver Check: If local user touches physical mouse on Companion PC, yield remote control!
+    // 1. Companion Receiver Check: If local user deliberately touches physical mouse on Companion PC, yield remote control!
     if (m_physics && m_physics->IsCompanionReceiving()) {
-        if (wParam == WM_MOUSEMOVE || wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+        if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+            m_companionPhysicalDelta = 0;
             if (m_onIntervention) {
                 m_onIntervention();
+            }
+        } else if (wParam == WM_MOUSEMOVE) {
+            int moveDist = std::abs(pMouse->pt.x - m_lastPos.x) + std::abs(pMouse->pt.y - m_lastPos.y);
+            m_lastPos = pMouse->pt;
+            m_companionPhysicalDelta += moveDist;
+            if (m_companionPhysicalDelta > 100) { // Require >100px deliberate physical movement
+                m_companionPhysicalDelta = 0;
+                if (m_onIntervention) {
+                    m_onIntervention();
+                }
             }
         }
         return CallNextHookEx(nullptr, nCode, wParam, lParam);
@@ -167,49 +179,25 @@ LRESULT InputCapturer::HandleMouseHook(int nCode, WPARAM wParam, LPARAM lParam) 
 
     if (isRemote) {
         if (wParam == WM_MOUSEMOVE) {
-            int rawDx = pMouse->pt.x - m_lastRemoteRawPos.x;
-            int rawDy = pMouse->pt.y - m_lastRemoteRawPos.y;
+            int dx = pMouse->pt.x - m_lastRemoteRawPos.x;
+            int dy = pMouse->pt.y - m_lastRemoteRawPos.y;
             m_lastRemoteRawPos = pMouse->pt;
 
-            if (rawDx != 0 || rawDy != 0) {
-                auto now = std::chrono::steady_clock::now();
-                double dtMs = std::chrono::duration<double, std::milli>(now - m_lastMoveTime).count();
-                m_lastMoveTime = now;
-
-                // Apply authentic Apple macOS pointer ballistics curve
-                double smoothDx = 0.0;
-                double smoothDy = 0.0;
-                ApplyMacBallistics(static_cast<double>(rawDx), static_cast<double>(rawDy), dtMs, smoothDx, smoothDy);
-
-                m_remoteCurX = std::clamp(m_remoteCurX + smoothDx, 0.0, static_cast<double>(m_remoteWidth));
-                m_remoteCurY = std::clamp(m_remoteCurY + smoothDy, 0.0, static_cast<double>(m_remoteHeight));
-
-                uint16_t normX = static_cast<uint16_t>((m_remoteCurX / m_remoteWidth) * 65535.0);
-                uint16_t normY = static_cast<uint16_t>((m_remoteCurY / m_remoteHeight) * 65535.0);
-
+            if (dx != 0 || dy != 0) {
                 if (m_onMouse) {
                     MouseInputPayload payload = {};
                     payload.flags = MFLAG_MOVE;
-                    payload.dx = static_cast<int16_t>(rawDx);
-                    payload.dy = static_cast<int16_t>(rawDy);
-                    payload.normX = normX;
-                    payload.normY = normY;
+                    payload.dx = static_cast<int16_t>(dx);
+                    payload.dy = static_cast<int16_t>(dy);
                     m_onMouse(payload);
                 }
 
-                // Floating Anchor: Only re-center when mouse approaches within 150px of physical display boundary
-                // This lets 98% of mouse ticks move with ZERO synthetic SendInput calls, completely eliminating queue lag!
-                const int EDGE_MARGIN = 150;
+                // Keep mouse cursor away from physical monitor edges so it never stops reporting deltas
+                const int EDGE_MARGIN = 200;
                 if (pMouse->pt.x < EDGE_MARGIN || pMouse->pt.x > m_screenWidth - EDGE_MARGIN ||
                     pMouse->pt.y < EDGE_MARGIN || pMouse->pt.y > m_screenHeight - EDGE_MARGIN) {
                     POINT center = { m_screenWidth / 2, m_screenHeight / 2 };
-                    INPUT in = {};
-                    in.type = INPUT_MOUSE;
-                    in.mi.dx = (center.x * 65536) / m_screenWidth;
-                    in.mi.dy = (center.y * 65536) / m_screenHeight;
-                    in.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-                    in.mi.dwExtraInfo = BUTTERFLOW_EXTRA_INFO_MAGIC;
-                    SendInput(1, &in, sizeof(INPUT));
+                    SetCursorPos(center.x, center.y);
                     m_lastRemoteRawPos = center;
                 }
             }

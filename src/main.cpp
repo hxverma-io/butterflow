@@ -136,7 +136,7 @@ int main(int argc, char* argv[]) {
     net.SetTransitionHandler([&](const CursorTransitionPayload& trans) {
         // We are receiving remote cursor: enter COMPANION_RECEIVING mode (disable local physics)
         physics.SetCompanionReceiving(true);
-        overlay.PlayTransitionBurst(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
+        overlay.Hide();
         injector.PlaceCursorAtEdge(static_cast<ScreenEdge>(trans.edge), trans.normalizedY);
         ui.Log("STREAM", "Remote cursor entered local screen display (Companion mode active).", Gdiplus::Color(255, 175, 82, 222));
     });
